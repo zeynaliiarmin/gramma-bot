@@ -23,19 +23,40 @@ async def get_or_create_user(
     full_name: str = "",
     locale: str = "en",
 ):
+    """Fetch a user by Telegram id, creating it atomically if missing.
+
+    Uses a dialect-aware `INSERT … ON CONFLICT DO NOTHING` so that bursts of
+    concurrent updates for the same new user (e.g. pending updates processed
+    at boot) never raise `UNIQUE constraint failed: users.id`.
+    """
     from app.models import User
 
     user = await session.get(User, telegram_id)
-    if user is None:
-        user = User(
-            id=telegram_id,
-            telegram_username=username,
-            full_name=full_name or (username or str(telegram_id)),
-            locale=locale,
-        )
-        session.add(user)
-        await session.flush()
-    return user
+    if user is not None:
+        return user
+
+    values = dict(
+        id=telegram_id,
+        telegram_username=username,
+        full_name=full_name or (username or str(telegram_id)),
+        locale=locale,
+    )
+
+    # Portability: build the right upsert statement for the active dialect.
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+    if session.bind is not None and session.bind.dialect.name == "postgresql":
+        stmt = pg_insert(User).values(**values).on_conflict_do_nothing(index_elements=["id"])
+    else:
+        stmt = sqlite_insert(User).values(**values).on_conflict_do_nothing()
+
+    await session.execute(stmt)
+    await session.flush()
+
+    # Re-read (the raw insert bypasses the identity map).
+    result = await session.execute(select(User).where(User.id == telegram_id))
+    return result.scalars().first()
 
 
 async def get_accounts_for_user(
