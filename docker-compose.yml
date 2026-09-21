@@ -1,0 +1,78 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gramma
+      POSTGRES_PASSWORD: gramma
+      POSTGRES_DB: gramma
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gramma -d gramma"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # ── Telegram bot + Mini-App API + Instagram webhook/OAuth ──
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gramma:gramma@db:5432/gramma
+      REDIS_URL: redis://redis:6379/0
+      SCHEDULER_BACKEND: celery
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["sh", "-c", "python run.py --create-tables && python run.py --no-scheduler"]
+
+  worker:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gramma:gramma@db:5432/gramma
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["celery", "-A", "app.tasks", "worker", "--loglevel=info", "--concurrency=2"]
+
+  beat:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gramma:gramma@db:5432/gramma
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["celery", "-A", "app.tasks", "beat", "--loglevel=info"]
+
+volumes:
+  pgdata:
+  redisdata:
