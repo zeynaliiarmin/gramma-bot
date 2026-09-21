@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { initTelegram } from './telegram.js'
-import { getToken, clearToken, loadToken } from './auth.js'
-import { api, openWebSocket } from './api.js'
+import { initTelegram, tgColorScheme } from './telegram.js'
+import { bootstrapToken, clearToken } from './auth.js'
+import { api, openWebSocket, resolveApiBase } from './api.js'
 import Dashboard from './components/Dashboard.jsx'
 import Pages from './components/Pages.jsx'
 import Calendar from './components/Calendar.jsx'
@@ -24,7 +24,7 @@ export default function App() {
       if (saved) return saved
     } catch (_) { /* noop */ }
     // follow Telegram's colorScheme when available
-    return (typeof window !== 'undefined' && window.Telegram?.WebApp?.colorScheme === 'dark') ? 'dark' : 'light'
+    return tgColorScheme() === 'dark' ? 'dark' : 'light'
   })
   const [me, setMe] = useState(null)
   const [status, setStatus] = useState('loading') // loading | ready | noauth
@@ -38,9 +38,12 @@ export default function App() {
     setTheme((t) => (t === 'dark' ? 'light' : 'dark'))
   }
 
-  // 1) Bootstrap: validate ticket against the backend.
+  // 1) Bootstrap: resolve a session ticket (SSO from bot OR Telegram initData
+  //    verification). Without valid auth we never call /api/me and show the
+  //    «دسترسی ممکن نیست» screen with no data exposed.
   useEffect(() => {
-    api('/api/me')
+    bootstrapToken(resolveApiBase())
+      .then(() => api('/api/me'))
       .then((data) => {
         setMe(data)
         setStatus('ready')

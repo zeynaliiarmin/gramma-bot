@@ -22,7 +22,7 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy import select
 
 from app.bot.handlers.common import account_options, log_activity, tr
-from app.bot.keyboards import main_menu
+from app.bot.keyboards import full_menu, main_menu, persistent_menu
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.security.oauth_states import oauth_states
@@ -86,10 +86,15 @@ async def cmd_start(message: Message, state: FSMContext):
         await session.commit()
         page_count = await count_accounts_for_user(session, message.from_user.id)
 
-    keyboard = main_menu(miniapp_ticket=make_miniapp_ticket(message.from_user.id))
+    keyboard = full_menu()
     await message.answer(
         _welcome_text(message.from_user.first_name, page_count),
         reply_markup=keyboard,
+    )
+    # Persistent «📋 منوی کامل» reply button — always visible in the chat.
+    await message.answer(
+        "👇 همیشه می‌توانید با دکمه «📋 منوی کامل» به منوی اصلی برگردید.",
+        reply_markup=persistent_menu(),
     )
 
 
@@ -98,7 +103,7 @@ async def cmd_help(message: Message):
     text = (
         "🧭 <b>راهنمای Gramma v2</b>\n\n"
         "/start — منوی اصلی\n"
-        "/connect — اتصال پیج اینستاگرام (حداکثر ۳ پیج)\n"
+        "/connect — اتصال پیج اینستاگرام (حداکثر 3 پیج)\n"
         "/publish — انتشار محتوا\n"
         "/calendar — تقویم محتوا 📅\n"
         "/collab — پست کلبریشن 🤝\n"
@@ -302,7 +307,7 @@ async def cb_connect_done(callback: CallbackQuery):
 @router.callback_query(F.data == "webapp:open")
 async def cb_webapp_open(callback: CallbackQuery):
     ticket = make_miniapp_ticket(callback.from_user.id)
-    public = (settings.public_base_url or "").rstrip("/")
+    public = settings.miniapp_url
     url = f"{public}/?_token={ticket}"
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -319,7 +324,7 @@ async def cb_webapp_open(callback: CallbackQuery):
 @router.message(Command("webapp"))
 async def cmd_webapp(message: Message):
     ticket = make_miniapp_ticket(message.from_user.id)
-    public = (settings.public_base_url or "").rstrip("/")
+    public = settings.miniapp_url
     url = f"{public}/?_token={ticket}"
     kb = InlineKeyboardMarkup(
         inline_keyboard=[

@@ -47,8 +47,8 @@ export default function Pages() {
                 {a.token_encrypted
                   ? 'توکن رمزنگاری‌شده (AES-256) 🔒'
                   : 'بدون توکن'}
-                {a.token_expires_at && (
-                  <> · انقضا: {new Date(a.token_expires_at).toLocaleDateString('fa-IR')}</>
+                {a.token_expires_jalali && (
+                  <> · انقضا (شمسی): {a.token_expires_jalali}</>
                 )}
               </div>
             </div>
@@ -66,7 +66,7 @@ export default function Pages() {
               حداکثر <b>{me.limits.max_total_users}</b> کاربر.
             </>
           ) : (
-            '💡 حالت Development اپ متا: حداکثر ۳ پیج برای هر کاربر و ۲۴ پیج برای کل ربات.'
+            '💡 حالت Development اپ متا: حداکثر 3 پیج برای هر کاربر و 24 پیج برای کل ربات.'
           )}
         </p>
       </div>

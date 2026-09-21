@@ -1,14 +1,18 @@
 """Gramma — Mini-App authentication.
 
-Every Mini-App request is authenticated with `X-Mini-App-Hash` — the
-HMAC-SHA256 hash (hex) of `<userId>:<expiresAt>` signed with the secret
-`ENCRYPTION_KEY`. We compute it server-side, embed it via the safe query
-parameter `_token` in the WebApp button URL, and the frontend sends it back
-as a header. Raw tokens are never persisted (no JWT in localStorage); the
-hash is only valid within its expiry window.
+Two independent, layered checks gate every Mini-App API call:
 
-This is a pragmatic auth for a bot used by a closed group of 5 testers,
-with every following API call additionally scoped by the resolved user id.
+  1. **Telegram initData (who you are)** — validated once when the Mini-App
+     opens, using the canonical HMAC-SHA256 algorithm signed with the bot
+     token (see app/core/security/tg_initdata.py). The validated telegram_id
+     is exchanged for a short-lived HMAC ticket via `POST /api/auth/verify`.
+  2. **Session ticket (what the API trusts)** — an HMAC-SHA256 hex hash of
+     `<userId>:<expiresAt>` signed with `ENCRYPTION_KEY`, sent by the SPA as
+     the `X-Mini-App-Hash` header on every request. Stored in sessionStorage
+     only (never localStorage, never a cookie).
+
+`initDataUnsafe.user.id` is never used as a source of truth — the hash is
+always verified first.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from dataclasses import dataclass
 from fastapi import Header, HTTPException
 
 from app.core.config import get_settings
+from app.core.security.tg_initdata import validate_init_data
 
 settings = get_settings()
 
@@ -63,10 +68,28 @@ def verify_ticket(ticket: str) -> MiniAppIdentity | None:
     return MiniAppIdentity(user_id=user_id, expires_at=expires_at)
 
 
+def verify_telegram_init_data(init_data: str) -> int | None:
+    """Validate Telegram's initData and return the **verified** telegram id.
+
+    Never trusts `initDataUnsafe`; the HMAC hash must match first.
+    Returns None when initData is missing/forged/expired.
+    """
+    fields = validate_init_data(init_data, settings.telegram_bot_token)
+    if not fields:
+        return None
+    user = fields.get("user")
+    if not isinstance(user, dict):
+        return None
+    try:
+        return int(user.get("id"))
+    except (TypeError, ValueError):
+        return None
+
+
 async def resolve_miniapp_user(
     x_mini_app_hash: str | None = Header(default=None),
 ) -> MiniAppIdentity:
-    """FastAPI dependency: validate the header and return the identity."""
+    """FastAPI dependency: validate the session-ticket header."""
     if not x_mini_app_hash:
         raise HTTPException(status_code=401, detail="missing auth header")
     identity = verify_ticket(x_mini_app_hash)

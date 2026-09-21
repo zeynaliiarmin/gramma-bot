@@ -8,8 +8,8 @@ def time_picker() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="⏱ +۱ ساعت", callback_data="schedule:quick:1h"),
-                InlineKeyboardButton(text="⏱ +۶ ساعت", callback_data="schedule:quick:6h"),
+                InlineKeyboardButton(text="⏱ +1 ساعت", callback_data="schedule:quick:1h"),
+                InlineKeyboardButton(text="⏱ +6 ساعت", callback_data="schedule:quick:6h"),
             ],
             [
                 InlineKeyboardButton(text="🌅 فردا صبح", callback_data="schedule:quick:tomorrow"),

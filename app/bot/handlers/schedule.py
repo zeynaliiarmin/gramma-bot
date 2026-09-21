@@ -2,7 +2,9 @@
 
 Scheduling paths:
   * "publish now" → set `scheduled_at = now` so the next sweep publishes it;
-  * "schedule for later" → ask for `YYYY-MM-DD HH:MM` in local tz.
+  * "schedule for later" → ask for a Jalali datetime (`1405/06/30 14:30`)
+    in Asia/Tehran. Smart phrases like «فردا صبح» are also understood.
+The DB stores Gregorian UTC; every display shown to the user is Jalali.
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.db.repositories import get_accounts_for_user, get_or_create_user
 from app.models import Media, Post
+from app.utils import jalali
+from app.utils.datetime_input import parse_natural_time
 
 settings = get_settings()
 router = Router(name="schedule")
@@ -63,10 +67,10 @@ async def cb_schedule_now(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "schedule:time")
 async def cb_schedule_time(callback: CallbackQuery, state: FSMContext):
     await state.set_state(TimeWait.waiting)
-    now_local = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now_local = jalali.to_jalali_str(datetime.now())
     await callback.message.edit_text(
-        f"🕰 زمان انتشار را وارد کنید (فرمت: YYYY-MM-DD HH:MM)\n"
-        f"مثلاً: {now_local}\n"
+        f"🕰 زمان انتشار را وارد کنید (شمسی — مثال: {now_local})\n"
+        "⏱ یا یک پیشنهاد سریع از دکمه‌های زیر بزنید.\n"
         f"منطقه زمانی: {settings.timezone}",
         reply_markup=time_picker(),
     )
@@ -89,10 +93,12 @@ async def cb_schedule_quick(callback: CallbackQuery, state: FSMContext):
 
 @router.message(TimeWait.waiting)
 async def time_received(message: Message, state: FSMContext):
-    dt = parse_local_datetime(message.text or "")
+    # Smart/NLP first («فردا صبح»), then exact Jalali date.
+    dt = parse_natural_time(message.text or "") or parse_local_datetime(message.text or "")
     if dt is None:
         await message.answer(
-            "⚠️ قالب نامعتبر است. مثال: 2026-09-21 18:30"
+            "⚠️ قالب نامعتبر است. مثال: 1405/06/30 14:30\n"
+            "یا بنویسید: فردا صبح، شنبه ساعت 10، ۲ ساعت بعد"
         )
         return
     data = await state.get_data()
@@ -104,6 +110,8 @@ async def _finalize_schedule(update_obj, state: FSMContext, post_id, dt_utc: dat
     """Shared finalizer for both callback & text scheduling paths."""
     if dt_utc.tzinfo is None:
         dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+    else:
+        dt_utc = dt_utc.astimezone(timezone.utc)
 
     if isinstance(update_obj, CallbackQuery):
         reply = update_obj.message.edit_text
@@ -126,7 +134,7 @@ async def _finalize_schedule(update_obj, state: FSMContext, post_id, dt_utc: dat
 
     await state.clear()
     await reply(
-        tr(None, "scheduled_ok", when=dt_utc.strftime("%Y-%m-%d %H:%M UTC"))
+        tr(None, "scheduled_ok", when=jalali.to_jalali_str(dt_utc))
     )
     if isinstance(update_obj, CallbackQuery):
         await update_obj.answer()
@@ -183,7 +191,7 @@ async def _show_schedule(callback: CallbackQuery, page: int):
 
     items = []
     for p in posts:
-        when = p.scheduled_at.strftime("%m-%d %H:%M") if p.scheduled_at else "—"
+        when = jalali.to_jalali_str(p.scheduled_at) if p.scheduled_at else "—"
         mark = "⏳" if p.status == "scheduled" else "❌"
         items.append((f"{mark} {p.kind} — {when} — {p.caption[:24]}", f"schedule:view:{p.id}"))
 
@@ -228,7 +236,7 @@ async def cb_schedule_view(callback: CallbackQuery):
             f"{status_icon} <b>جزئیات پست</b>\n"
             f"نوع: {post.kind}\n"
             f"کپشن: {post.caption or '—'}\n"
-            f"زمان: {post.scheduled_at.strftime('%Y-%m-%d %H:%M UTC') if post.scheduled_at else '—'}\n"
+            f"زمان انتشار (شمسی): {jalali.to_jalali_str(post.scheduled_at) if post.scheduled_at else '—'}\n"
             f"تعداد رسانه: {media_count}\n"
             f"لینک: {post.ig_permalink or '—'}\n"
         )

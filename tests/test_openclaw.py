@@ -71,7 +71,14 @@ async def test_client_sends_contract_and_parses_reply():
     assert out == "کپشن تستی ✨"
     assert captured["url"] == "http://127.0.0.1:18789/api/ask"
     assert captured["json"]["message"] == "موضوع"
-    assert captured["json"]["context"] == {"kind": "caption"}
+    # The client now always injects the current Jalali date/time snapshot
+    # into the context (user requirement: OpenClaw receives the Shamsi date).
+    ctx = captured["json"]["context"]
+    assert ctx["kind"] == "caption"
+    assert "current_date_jalali" in ctx
+    assert "current_time" in ctx
+    assert "day_of_week" in ctx
+    assert ctx.get("timezone") == "Asia/Tehran"
     assert captured["json"]["task"] == "caption"
 
 

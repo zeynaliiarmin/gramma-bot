@@ -31,15 +31,15 @@ export default function Dashboard() {
     <>
       <div className="side-panel-holder">
         <div className="stat">
-          <div className="num">{totals.followers.toLocaleString('fa-IR')}</div>
+          <div className="num">{totals.followers.toLocaleString('en-US')}</div>
           <div className="lbl">👥 فالوور کل</div>
         </div>
         <div className="stat">
-          <div className="num">{totals.reach.toLocaleString('fa-IR')}</div>
+          <div className="num">{totals.reach.toLocaleString('en-US')}</div>
           <div className="lbl">📈 دسترسی امروز</div>
         </div>
         <div className="stat">
-          <div className="num">{totals.posts.toLocaleString('fa-IR')}</div>
+          <div className="num">{totals.posts.toLocaleString('en-US')}</div>
           <div className="lbl">🖼 پست‌ها</div>
         </div>
         <div className="stat">
@@ -67,7 +67,7 @@ export default function Dashboard() {
             <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 700 }}>@{c.username || '—'}</div>
               <div style={{ fontSize: 11, color: 'var(--muted)' }}>
-                {c.name} · {Number(c.followers || 0).toLocaleString('fa-IR')} فالوور
+                {c.name} · {Number(c.followers || 0).toLocaleString('en-US')} فالوور
               </div>
             </div>
             <span className={'badge ' + (c.status === 'connected' ? 'ok' : 'err')}>

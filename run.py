@@ -23,6 +23,17 @@ from app.core.logging import setup_logging
 setup_logging(get_settings().log_level)
 logger = logging.getLogger("gramma")
 
+# Update types the bot explicitly receives. This prevents Telegram from
+# silently dropping callback_query / inline_query / web_app_data updates
+# (root cause of "buttons do nothing").
+ALLOWED_UPDATES = [
+    "message",
+    "edited_message",
+    "callback_query",
+    "inline_query",
+    "web_app_data",
+]
+
 
 async def _amain(args: argparse.Namespace) -> None:
     settings = get_settings()
@@ -51,7 +62,7 @@ async def _amain(args: argparse.Namespace) -> None:
     bot = get_bot()
     dp = get_dispatcher()
 
-    coros = [dp.start_polling(bot)]
+    coros = [dp.start_polling(bot, allowed_updates=ALLOWED_UPDATES)]
 
     if not args.no_api:
         from app.webapp.server import serve

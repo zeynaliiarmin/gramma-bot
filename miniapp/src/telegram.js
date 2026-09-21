@@ -1,9 +1,9 @@
-// Gramma Mini-App — Telegram WebApp bootstrap + token plumbing.
+// Gramma Mini-App — Telegram WebApp bootstrap.
 //
-// The Mini-App is entered via a WebApp button whose URL carries `?_token=`
-// (an HMAC ticket minted by the backend). We also honour `tgWebAppData`
-// (initData) from Telegram for display purposes, but we never trust it for
-// auth — our own ticket is always required by the API.
+// The Mini-App is entered via the bot's WebApp button whose URL carries a
+// signed ticket (`?_token=`) minted by our backend; when absent, the SPA
+// falls back to validating Telegram's signed initData server-side (never
+// trusting initDataUnsafe). See auth.js for the full flow.
 
 export function initTelegram() {
   let tg = null
@@ -13,4 +13,13 @@ export function initTelegram() {
     try { tg.expand() } catch (_) { /* noop */ }
   }
   return tg
+}
+
+export function tgColorScheme() {
+  try {
+    const tg = window.Telegram && window.Telegram.WebApp
+    return (tg && tg.colorScheme) || 'light'
+  } catch (_) {
+    return 'light'
+  }
 }

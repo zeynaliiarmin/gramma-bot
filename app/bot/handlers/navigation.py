@@ -11,6 +11,7 @@ from app.bot.handlers.common import account_options, log_activity, tr
 from app.bot.keyboards import (
     community_menu,
     direct_menu,
+    full_menu,
     insights_menu,
     main_menu,
     publish_menu,
@@ -57,6 +58,16 @@ async def cb_nav(callback: CallbackQuery):
         labels.get(target, "🏠 منوی اصلی"), reply_markup=kb
     )
     await callback.answer()
+
+
+# ── Persistent «📋 منوی کامل» button ─────────────────────────
+@router.message(F.text.in_(["📋 منوی کامل", "منوی کامل"]))
+async def msg_full_menu(message: Message):
+    """The persistent reply-keyboard button opens the complete inline menu."""
+    await message.answer(
+        "📋 منوی کامل — همه امکانات ربات:",
+        reply_markup=full_menu(),
+    )
 
 
 # ── Section commands ─────────────────────────────────────────

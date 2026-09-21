@@ -1,6 +1,6 @@
 // Gramma Mini-App — tiny API client with auth header + graceful errors.
 
-import { getToken } from './auth.js'
+import { clearToken, getToken } from './auth.js'
 
 // The backend origin can be overridden at build time (VITE_API_BASE) or via
 // localStorage; defaults to same-origin (backend serves the SPA in Docker).
@@ -29,7 +29,8 @@ export async function api(path, options = {}) {
   }
   const res = await fetch(base + path, { ...options, headers })
   if (res.status === 401) {
-    throw new ApiError(401, 'نشست شما منقضی شده؛ لطفاً دوباره از ربات وارد شوید.')
+    clearToken()
+    throw new ApiError(401, 'نشست نامعتبر است؛ لطفاً از داخل ربات و دکمه «پنل مدیریت» وارد شوید.')
   }
   if (!res.ok) {
     let detail = res.statusText

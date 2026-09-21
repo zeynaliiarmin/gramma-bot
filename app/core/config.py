@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     s3_secret_key: str = ""
     s3_public_base: str = ""
 
+    # ── Mini-App ──────────────────────────────────────────────
+    # Public HTTPS URL of the Mini-App SPA (Vercel). Used when building the
+    # Telegram WebApp button URL. Falls back to public_base_url.
+    miniapp_public_url: str = ""
+
     # ── Misc ──────────────────────────────────────────────────
     log_level: str = "INFO"
     data_retention_days: int = 90
@@ -105,6 +110,8 @@ class Settings(BaseSettings):
     public_base_url: str = ""           # public gateway for the Mini-App
     backup_dir: str = "backups"         # where rolling backups are written
     smart_notifications_enabled: bool = True
+    # Reminder before a scheduled post fires (minutes).
+    post_reminder_minutes_before: int = 30
 
     @property
     def admin_ids(self) -> set[int]:
@@ -115,6 +122,11 @@ class Settings(BaseSettings):
             if part.isdigit():
                 out.add(int(part))
         return out
+
+    @property
+    def miniapp_url(self) -> str:
+        """Public Mini-App origin (dedicated var first, gateway fallback)."""
+        return (self.miniapp_public_url or self.public_base_url or "").rstrip("/")
 
     @property
     def is_simulation(self) -> bool:

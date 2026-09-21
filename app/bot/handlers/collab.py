@@ -21,6 +21,7 @@ from app.bot.keyboards import back
 from app.core.database import SessionLocal
 from app.db.repositories import get_accounts_for_user, get_or_create_user
 from app.models import InstagramAccount, Post
+from app.utils import jalali
 from app.services.collab import (
     CollabRequest,
     CollabStatus,
@@ -273,6 +274,6 @@ async def cb_collab_history(callback: CallbackQuery):
     lines = ["📋 تاریخچه کلبریشن‌ها:\n"]
     for r in rows:
         s = emoji.get(r.status, "•")
-        lines.append(f"{s} {r.status} — {r.created_at.strftime('%m-%d %H:%M')} — «{r.message[:30]}»")
+        lines.append(f"{s} {r.status} — {jalali.to_jalali_str(r.created_at)} — «{r.message[:30]}»")
     await callback.message.edit_text("\n".join(lines), reply_markup=_menu())
     await callback.answer()

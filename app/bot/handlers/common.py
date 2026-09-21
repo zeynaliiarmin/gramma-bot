@@ -7,9 +7,7 @@ data-isolation invariant is enforced by construction.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -118,11 +116,10 @@ async def log_activity(
 
 
 def parse_local_datetime(text: str) -> datetime | None:
-    """Parse 'YYYY-MM-DD HH:MM' in the configured timezone → UTC dt."""
-    text = text.strip().replace("T", " ")
-    try:
-        naive = datetime.strptime(text, "%Y-%m-%d %H:%M")
-    except ValueError:
-        return None
-    local_tz = ZoneInfo(settings.timezone)
-    return naive.replace(tzinfo=local_tz).astimezone()
+    """Parse a user's Jalali datetime ('1405/06/30 14:30') → UTC dt.
+
+    Centralised in app/utils/jalali.py; the DB always stores Gregorian UTC.
+    """
+    from app.utils.jalali import parse_jalali_input
+
+    return parse_jalali_input(text or "")

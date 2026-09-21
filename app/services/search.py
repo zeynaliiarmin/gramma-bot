@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models import Comment, Conversation, InstagramAccount
+from app.utils import jalali
 
 logger = logging.getLogger("gramma.search")
 settings = get_settings()
@@ -143,7 +144,7 @@ async def search_history(
                         account_id=c.account_id,
                         username=c.username,
                         text=c.text,
-                        created_at=c.created_at.strftime("%Y-%m-%d"),
+                        created_at=jalali.jalali_date_str(c.created_at),
                         meta={"replied": c.replied},
                     )
                 )
@@ -171,7 +172,7 @@ async def search_history(
                         account_id=conv.account_id,
                         username=conv.counterpart_name,
                         text=conv.last_message_preview,
-                        created_at=conv.updated_at.strftime("%Y-%m-%d"),
+                        created_at=jalali.jalali_date_str(conv.updated_at),
                         meta={"category": conv.category},
                     )
                 )

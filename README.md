@@ -164,9 +164,11 @@ npm run build              # خروجی → dist (برای Vercel)
 روی Vercel، متغیر `VITE_API_BASE` آدرس بک‌اند عمومی (https://your-backend) را مشخص می‌کند؛ مینی‌اپ از همان origin بک‌اند هم قابل سرو است (Docker).
 
 ### امنیت مینی‌اپ
-- ورود با **بلیط HMAC** (`_token`) که سرور می‌سازد (۲۴ ساعت اعتبار، امضاشده).
-- هر درخواست با هدر `X-Mini-App-Hash` امضا می‌شود؛ کاربر از همان استخراج و همه کوئری‌ها scope می‌شوند.
-- `initData تلگرام` فقط نمایشی است؛ بلیط ما منبع اصلی اعتماد است.
+- دکمه WebApp یک **بلیط HMAC** (`_token`) امضا‌شده با `ENCRYPTION_KEY` می‌سازد (۲۴ ساعت اعتبار).
+- وقتی URL بدون بلیط باز شود، مینی‌اپ `initData` تلگرام را می‌گیرد و به `POST /api/auth/verify` می‌فرستد؛ سرور **HMAC-SHA256** را با توکن ربات اعتبارسنجی می‌کند (مطابق راهنمای رسمی تلگرام) و فقط در صورت معتبر بودن، بلیط می‌سازد. `initDataUnsafe.user.id` هرگز بدون چک hash قابل اعتماد نیست.
+- باز شدن مستقیم در مرورگر یا از ربات دیگر → پیام «دسترسی ممکن نیست» و **هیچ داده‌ای نمایش داده نمی‌شود**.
+- بلیط نشست فقط در `sessionStorage` نگه‌داری می‌شود (نه localStorage نه کوکی) و به‌صورت هدر `X-Mini-App-Hash` در هر درخواست ارسال می‌شود.
+- CORS فقط برای دامنه `MINIAPP_PUBLIC_URL` / `PUBLIC_BASE_URL` باز است.
 
 ---
 
@@ -196,7 +198,8 @@ docker compose up -d --build
 | `DATABASE_URL` / `REDIS_URL` | sqlite یا postgresql+asyncpg |
 | `INSTAGRAM_ACCOUNT_MODE` | simulation / production |
 | `META_APP_ID` / `META_APP_SECRET` / `META_VERIFY_TOKEN` / `WEBHOOK_BASE_URL` | مشخصات متا |
-| `MAX_ACCOUNTS_PER_USER`=3 / `MAX_TOTAL_ACCOUNTS_DEV`=24 | محدودیت‌ها |
+| `MAX_ACCOUNTS_PER_USER`=3 / `MAX_TOTAL_INSTAGRAM_ACCOUNTS`=24 / `MAX_TOTAL_USERS`=24 | محدودیت‌های پلتفرم (متمرکز در `app/services/limits.py`) |
+| `MINIAPP_PUBLIC_URL` | آدرس عمومی مینی‌اپ (Vercel) برای ساخت URL دکمه WebApp |
 | `AVALAI_API_KEY` / `AVALAI_MODEL` | تولید کپشن (مسیر مستقیم / فال‌بک) |
 | `TAVILY_API_KEY` | جستجوی وب (فال‌بک مستقیم) |
 | `OPENCLAW_BASE_URL` / `OPENCLAW_TOKEN` / `OPENCLAW_TIMEOUT` | گیت‌وی هوش مصنوعی OpenClaw (پیش‌فرض `http://127.0.0.1:18789`، تایم‌اوت ۳۰ ثانیه) |

@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.core.config import get_settings
 from app.services.meta.service import InstagramService
+from app.utils import jalali
 
 settings = get_settings()
 
@@ -72,7 +73,7 @@ def format_health_report(report: HealthReport) -> str:
     lines = [
         f"🩺 گزارش سلامت پیج — {report.account_name}",
         f"👤 {report.username}",
-        f"🕒 {report.generated_at.strftime('%Y-%m-%d %H:%M UTC')}",
+        f"🕒 {jalali.to_jalali_str(report.generated_at)}",
         "─" * 22,
         "📊 آمار امروز:",
     ]

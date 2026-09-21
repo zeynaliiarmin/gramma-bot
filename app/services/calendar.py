@@ -1,92 +1,35 @@
-"""Gramma — content calendar.
+"""Gramma — content calendar (Jalali-first).
 
 Groups a user's scheduled posts by Persian calendar day so both the bot's
-"تقویم محتوا" and the Mini-App calendar can render a clean month view.
+"تقویم محتوا" and the Mini-App calendar render a clean Jalali view, with
+Gregorian↔Jalali conversions centralized in app/utils/jalali.py.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-if TYPE_CHECKING:
-    from app.models import InstagramAccount
+from app.core.config import get_settings
+from app.utils.jalali import FA_MONTHS, from_jalali, to_jalali, weekday_fa
 
-try:
-    from babel.dates import format_date
-    from babel.dates import get_day_names as _day_names
-    from babel import Locale
-
-    _FA = Locale.parse("fa")
-    _HAS_BABEL = True
-except Exception:  # pragma: no cover
-    _HAS_BABEL = False
-
-
-def _fa_day_names(width="abbreviated"):
-    if _HAS_BABEL:
-        try:
-            return list(_day_names(width, locale=_FA))
-        except Exception:
-            pass
-    return ["دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه", "شنبه", "یکشنبه"]
-
-
-def _fa_month_name(month: int) -> str:
-    names = [
-        "", "فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
-        "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند",
-    ]
-    return names[month] if 1 <= month <= 12 else str(month)
-
-
-def to_jalali(dt: datetime) -> tuple[int, int, int]:
-    """Convert a datetime (UTC) to (jyear, jmonth, jday) using the standard
-    33-year arithmetic algorithm (jalali-js compatible, no dependencies)."""
-    d = dt.astimezone(timezone.utc)
-    gy, gm, gd = d.year, d.month, d.day
-    g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
-    gy2 = gy + 1 if gm > 2 else gy
-    days = (
-        355666
-        + 365 * gy
-        + (gy2 + 3) // 4
-        - (gy2 + 99) // 100
-        + (gy2 + 399) // 400
-        + gd
-        + g_d_m[gm - 1]
-    )
-    jy = -1595 + 33 * (days // 12053)
-    days %= 12053
-    jy += 4 * (days // 1461)
-    days %= 1461
-    if days > 365:
-        jy += (days - 1) // 365
-        days = (days - 1) % 365
-    if days < 186:
-        jm = 1 + days // 31
-        jd = 1 + days % 31
-    else:
-        jm = 7 + (days - 186) // 30
-        jd = 1 + (days - 186) % 30
-    return jy, jm, jd
+settings = get_settings()
 
 
 def fa_weekday(dt: datetime) -> str:
-    """Persian weekday name. Python weekday(): Mon=0..Sun=6. Map to FA order."""
-    wd = dt.astimezone(timezone.utc).weekday()  # 0=Mon
-    # FA calendar list starts at Saturday → index mapping
-    fa_index = {"sat": 0, "sun": 1, "mon": 2, "tue": 3, "wed": 4, "thu": 5, "fri": 6}
-    py = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][wd]
-    names = ["شنبه", "یکشنبه", "دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه"]
-    return names[fa_index[py]]
+    """Back-compat alias → Persian day-of-week name (شنبه، …)."""
+    return weekday_fa(dt)
+
+
+def fa_month_name(jm: int) -> str:
+    return FA_MONTHS[jm - 1] if 1 <= jm <= 12 else str(jm)
 
 
 async def build_calendar(session: AsyncSession, user_id: int, account_ids: list[int]) -> list[dict]:
-    """Return scheduled posts grouped by Persian date (ascending)."""
+    """Return scheduled posts grouped by Jalali date (ascending)."""
     from app.models import Post
 
     result = await session.execute(
@@ -106,7 +49,7 @@ async def build_calendar(session: AsyncSession, user_id: int, account_ids: list[
                 "id": p.id,
                 "kind": p.kind,
                 "caption": (p.caption or "")[:60],
-                "at": p.scheduled_at.strftime("%H:%M"),
+                "at": p.scheduled_at.astimezone(ZoneInfo(settings.timezone)).strftime("%H:%M"),
                 "status": p.status,
             }
         )
@@ -114,19 +57,100 @@ async def build_calendar(session: AsyncSession, user_id: int, account_ids: list[
     out = []
     for key in sorted(buckets):
         jy, jm, jd = key
-        label = f"{(jd)} {_fa_month_name(jm)} {jy}"
-        items = buckets[key]
-        out.append({"date": f"{jy}-{jm:02d}-{jd:02d}", "label": label, "posts": items})
+        out.append(
+            {
+                "date": f"{jy}-{jm:02d}-{jd:02d}",
+                "label": f"{jd} {fa_month_name(jm)} {jy}",
+                "weekday": _weekday_of_jalali(key),
+                "posts": buckets[key],
+            }
+        )
     return out
+
+
+def _weekday_of_jalali(key: tuple[int, int, int]) -> str:
+    from app.utils.jalali import weekday_fa
+
+    return weekday_fa(from_jalali(key[0], key[1], key[2]))
 
 
 def format_calendar(entries: list[dict]) -> str:
     if not entries:
         return "📅 هنوز پستی زمان‌بندی نشده است.\nاز بخش انتشار، پست بسازید و زمان‌بندی کنید."
-    lines = ["📅 <b>تقویم محتوا</b>\n"]
+    lines = ["📅 <b>تقویم محتوا</b> (شمسی)\n"]
     for entry in entries[:14]:
-        lines.append(f"▫️ <b>{entry['label']}</b>")
+        lines.append(f"▫️ <b>{entry['label']}</b> · {entry['weekday']}")
         for p in entry["posts"]:
-            kind_icon = {"photo": "🖼", "video": "🎬", "reel": "🛰", "carousel": "🌀", "story": "📸"}.get(p["kind"], "•")
+            kind_icon = {
+                "photo": "🖼", "video": "🎬", "reel": "🛰",
+                "carousel": "🌀", "story": "📸",
+            }.get(p["kind"], "•")
             lines.append(f"    {kind_icon} {p['at']} — {p['caption'][:32]}")
     return "\n".join(lines)
+
+
+def build_month_grid(jy: int, jm: int) -> list[dict]:
+    """A Jalali month grid (weeks starting Saturday) for the visual calendar.
+
+    Each cell: {day, jdate, is_current_month, weekday}.
+    """
+    days_in_month = 31 if jm <= 6 else (30 if jm <= 11 else 29)  # Esfand 29/30
+    if jm == 12:
+        # leap-Jalali check (approx): year % 33 in {1,5,9,13,17,22,26,30}
+        if (jy % 33) in {1, 5, 9, 13, 17, 22, 26, 30}:
+            days_in_month = 30
+    first = from_jalali(jy, jm, 1)
+    # Jalali week: Saturday=0 … Friday=6
+    weekday_index = (first.weekday() + 1) % 7  # Mon..Sun(0..6) → Sat..Fri(0..6)
+    cells = []
+    for i in range(weekday_index):
+        cells.append({"day": None, "jdate": None, "is_current_month": False, "weekday": None})
+    for d in range(1, days_in_month + 1):
+        cells.append(
+            {
+                "day": d,
+                "jdate": f"{jy}-{jm:02d}-{d:02d}",
+                "is_current_month": True,
+                "weekday": (weekday_index + d - 1) % 7,
+            }
+        )
+    while len(cells) % 7:
+        cells.append({"day": None, "jdate": None, "is_current_month": False, "weekday": None})
+    return cells
+
+
+def month_meta(jy: int, jm: int) -> dict:
+    """Month header + weekday names (Sat-first) + a small occasion hint."""
+    prev = (jy, jm - 1) if jm > 1 else (jy - 1, 12)
+    nxt = (jy, jm + 1) if jm < 12 else (jy + 1, 1)
+    occasions = _occasions_for_month(jm)
+    return {
+        "year": jy,
+        "month": jm,
+        "label": f"{fa_month_name(jm)} {jy}",
+        "prev": f"{prev[0]}-{prev[1]:02d}",
+        "next": f"{nxt[0]}-{nxt[1]:02d}",
+        "weeknames": ["ش", "ی", "د", "س", "چ", "پ", "ج"],
+        "occasions": occasions,
+    }
+
+
+# ── Iranian occasions (for scheduling suggestions) ────────────
+_OCCASIONS = [
+    (1, 1, "🎉 نوروز"),
+    (1, 2, "🌱 روز طبیعت سیزده‌به‌در"),
+    (1, 12, "🏛 روز جمهوری اسلامی"),
+    (1, 13, "🌿 سیزده‌به‌در"),
+    (6, 31, "🍉 شب یلدا (آستانه)"),
+    (7, 1, "🎒 بازگشایی مدارس"),
+    (7, 8, "📚 روز بزرگداشت مولوی"),
+    (9, 1, "🎄 آستانه کریسمس ارامنه"),
+    (9, 30, "❄️ شب یلدا"),
+    (10, 25, "🌙 (ماه رمضان may vary — تقویم قمری)"),
+    (11, 22, "🔥 جشن سده"),
+    (12, 29, "🎊 روز ملی‌شدن نفت"),
+]
+
+
+def _occasions_for_month(jm: int) -> list[str]:
+    return [f"{d} {fa_month_name(m)} — {label}" for (m, d, label) in _OCCASIONS if m == jm]

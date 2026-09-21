@@ -14,6 +14,7 @@ from app.db.repositories import get_accounts_for_user, get_or_create_user
 from app.services.insights import build_health_report
 from app.services.insights import format_health_report
 from app.services.meta.service import InstagramService
+from app.utils import jalali
 
 router = Router(name="insights")
 
@@ -54,7 +55,7 @@ async def cb_dashboard(callback: CallbackQuery):
         f"👥 دنبال‌کننده: {followers}\n"
         f"🖼 تعداد پست: {info.get('media_count', '—')}\n"
         f"🟢 وضعیت اتصال: {account.status}\n"
-        f"🕒 آخرین همگام‌سازی: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"
+        f"🕒 آخرین همگام‌سازی: {jalali.to_jalali_str(datetime.now(timezone.utc))}"
     )
     await callback.message.edit_text(text, reply_markup=insights_menu())
     await callback.answer()
@@ -144,7 +145,7 @@ async def cb_security(callback: CallbackQuery):
         lines.append("رویدادی ثبت نشده است.")
     for lg in logs:
         icon = {"error": "🔴", "warning": "🟠"}.get(lg.level, "🟢")
-        lines.append(f"{icon} {lg.created_at.strftime('%m-%d %H:%M')} — {lg.action}")
+        lines.append(f"{icon} {jalali.to_jalali_str(lg.created_at)} — {lg.action}")
         if lg.detail:
             lines.append(f"    {lg.detail[:90]}")
     await callback.message.edit_text("\n".join(lines), reply_markup=insights_menu())

@@ -23,6 +23,7 @@ from typing import Any, Optional
 import httpx
 
 from app.core.config import get_settings
+from app.utils.jalali import current_jalali_context as get_jalali_context
 
 settings = get_settings()
 logger = logging.getLogger("gramma.openclaw")
@@ -115,7 +116,9 @@ class OpenClawClient:
 
         payload = {
             "message": message,
-            "context": dict(context or {}),
+            # Always attach the current Jalali date/time snapshot so OpenClaw
+            # reasons in the user's Persian calendar (Asia/Tehran).
+            "context": {**get_jalali_context(), **(dict(context or {}))},
             "task": task,
         }
         url = f"{self.base_url}/api/ask"

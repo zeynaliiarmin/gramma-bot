@@ -6,11 +6,15 @@ consistent and users interact with buttons instead of typing commands.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import TYPE_CHECKING
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    WebAppInfo,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 if TYPE_CHECKING:
@@ -29,6 +33,21 @@ MAIN_KB = [
     ("🛠 تنظیمات", "settings:menu"),
 ]
 
+# The complete menu (all capabilities) opened by the persistent "منوی کامل"
+# button and the /start welcome screen. Every callback_data here is handled.
+FULL_KB = [
+    ("📤 انتشار", "publish:menu"),
+    ("🛰 ریلز", "publish:new:reel"),
+    ("📸 استوری", "publish:new:story"),
+    ("💬 کامنت‌ها", "community:comments"),
+    ("📥 دایرکت", "direct:menu"),
+    ("📅 تقویم", "calendar:menu"),
+    ("🤝 کلبریشن", "collab:menu"),
+    ("📈 آمار پیج", "insights:menu"),
+    ("🛠 تنظیمات", "settings:menu"),
+    ("🖥 پنل مدیریت", "webapp:open"),
+]
+
 
 def main_menu(miniapp_ticket: str | None = None) -> InlineKeyboardMarkup:
     """The bot's home screen (with an optional Mini-App control-panel button)."""
@@ -39,6 +58,30 @@ def main_menu(miniapp_ticket: str | None = None) -> InlineKeyboardMarkup:
         builder.button(text="🖥 پنل مدیریت (Mini-App)", callback_data="webapp:open")
     builder.adjust(2)
     return builder.as_markup()
+
+
+def full_menu() -> InlineKeyboardMarkup:
+    """The complete inline menu (منوی کامل) with every capability."""
+    builder = InlineKeyboardBuilder()
+    for text, cb in FULL_KB:
+        builder.button(text=text, callback_data=cb)
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def persistent_menu() -> ReplyKeyboardMarkup:
+    """Persistent reply keyboard with the «📋 منوی کامل» button.
+
+    The button stays visible in the chat at all times; when pressed it sends
+    the text «📋 منوی کامل» which the bot answers with the full inline menu
+    (full_menu). Uses input_field_placeholder to hint typing in RTL.
+    """
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📋 منوی کامل")]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        input_field_placeholder="روی «📋 منوی کامل» بزنید",
+    )
 
 
 def back(target: str = "home") -> list[InlineKeyboardButton]:

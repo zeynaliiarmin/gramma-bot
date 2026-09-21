@@ -32,20 +32,29 @@ from app.services.calendar import build_calendar
 from app.services.collab import CollabRequest, get_collab_for_user
 from app.services.insights import get_dashboard_snapshot
 from app.services.limits import get_limits
-from app.webapp.auth import MiniAppIdentity, resolve_miniapp_user
+from app.utils import jalali
+from app.webapp.auth import (
+    MiniAppIdentity,
+    make_miniapp_ticket,
+    resolve_miniapp_user,
+    verify_telegram_init_data,
+)
 
 settings = get_settings()
 logger = logging.getLogger("gramma.webapp")
 
 app = FastAPI(title="Gramma Mini-App API", version="3.0.0")
 
-# CORS: allow the Vercel-hosted Mini-App (and any configured public origin)
-# to call this API. Restricted to the configured base URL when present.
-_cors_origins = ["*"]
-if settings.public_base_url:
-    base = settings.public_base_url.rstrip("/")
-    _cors_origins = [base, base + "/*"]
-    # Allow telegram webapp origins too (they come as https://...)
+# CORS: allow ONLY our own Mini-App origin(s). The Telegram WebApp always
+# originates from one of these configured URLs, so nothing else may call the
+# API from a browser. Falls back to permissive '*' for local development
+# (backend + SPA on the same origin, port 8000).
+_configured_origins = [
+    o.rstrip("/")
+    for o in (settings.miniapp_public_url, settings.public_base_url)
+    if o and o.strip()
+]
+_cors_origins = list(dict.fromkeys(_configured_origins)) or ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -88,6 +97,12 @@ async def _account_dicts(user_id: int) -> list[dict]:
                     "profile_pic_url": a.profile_pic_url,
                     "token_encrypted": bool(a.long_lived_token_enc),
                     "token_expires_at": a.token_expires_at.isoformat() if a.token_expires_at else None,
+                    # User-facing Jalali expiry (Latin digits) for the SPA.
+                    "token_expires_jalali": (
+                        jalali.jalali_date_str(a.token_expires_at)
+                        if a.token_expires_at
+                        else None
+                    ),
                     "ig_user_id": a.instagram_user_id,
                 }
             )
@@ -102,6 +117,39 @@ def _with_limits(payload: dict, limits_dict: dict) -> dict:
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
+
+
+@app.post("/api/auth/verify")
+async def api_auth_verify(body: dict):
+    """Exchange valid Telegram initData for a session ticket.
+
+    Called once by the SPA on load. The initData HMAC is verified against the
+    bot token (never `initDataUnsafe`); on success we mint the same HMAC
+    ticket the WebApp button would embed, and return it for sessionStorage.
+    """
+    init_data = (body or {}).get("initData") or ""
+    uid = verify_telegram_init_data(init_data)
+    if uid is None:
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "initData نامعتبر است؛ از داخل ربات وارد شوید."},
+        )
+    from app.core.database import SessionLocal
+    from app.services.limits import can_register_user
+
+    # Same hard user cap as /start (single source: limits.py).
+    async with SessionLocal() as session:
+        allowed, _reason = await can_register_user(session, uid)
+        if not allowed:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "ظرفیت کاربران ربات تکمیل شده است."},
+            )
+    return {
+        "ok": True,
+        "user_id": uid,
+        "ticket": make_miniapp_ticket(uid),
+    }
 
 
 @app.get("/api/me")
@@ -173,7 +221,7 @@ async def api_dashboard(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
 
         for i in range(6, -1, -1):
             day = datetime.now(tz) - timedelta(days=i)
-            series["labels"].append(day.strftime("%a"))
+            series["labels"].append(jalali.weekday_fa(day))
             series["reach"].append(random.randint(200, 1200))
             series["followers"].append(random.randint(0, 60))
         return {"cards": cards, "series": series}
@@ -211,6 +259,7 @@ async def api_scheduled(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
                 "caption": (p.caption or "")[:120],
                 "status": p.status,
                 "scheduled_at": p.scheduled_at.isoformat() if p.scheduled_at else None,
+                "when_jalali": jalali.to_jalali_str(p.scheduled_at) if p.scheduled_at else None,
                 "permalink": p.ig_permalink,
             }
             for p in result.scalars()
@@ -239,6 +288,7 @@ async def api_collabs(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
                 "message": r.message,
                 "status": r.status,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
+                "created_jalali": jalali.to_jalali_str(r.created_at) if r.created_at else None,
             }
             for r in result.scalars()
         ]

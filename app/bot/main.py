@@ -67,7 +67,56 @@ def build_dispatcher() -> Dispatcher:
     ):
         dp.include_router(module.router)
 
+    # Catch-all router LAST: logs unhandled callbacks/timers and answers the
+    # user with a friendly message, so a button never silently does nothing.
+    dp.include_router(_fallback_router())
+
     return dp
+
+
+def _fallback_router() -> "Router":
+    """Late-bound router that catches any callback_query no handler claimed."""
+    from aiogram import F, Router
+    from aiogram.types import CallbackQuery, Message, TelegramObject
+
+    router = Router(name="fallback")
+
+    @router.callback_query()
+    async def unhandled_callback(callback: CallbackQuery):
+        data = getattr(callback, "data", None)
+        logger.warning(
+            "unhandled callback %r from user=%s", data, callback.from_user.id
+        )
+        from app.bot.keyboards import main_menu
+
+        try:
+            await callback.answer("این دکمه در دسترس نیست.", show_alert=False)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await callback.message.edit_text(
+                "🏠 منوی اصلی:", reply_markup=main_menu()
+            )
+        except Exception:  # noqa: BLE001
+            try:
+                await callback.message.answer(
+                    "🏠 منوی اصلی:", reply_markup=main_menu()
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    @router.message()
+    async def unhandled_text(message: Message):
+        # Only fires when NO state filter matched (e.g. user typed something
+        # outside a dialog). Keep it silent — do not spam every message.
+        logger.info(
+            "unhandled plain message from user=%s: %r",
+            message.from_user.id,
+            (message.text or "")[:60],
+        )
+
+    return router
+
 
 
 def get_dispatcher() -> Dispatcher:
