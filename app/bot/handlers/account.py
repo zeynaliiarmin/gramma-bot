@@ -1,7 +1,8 @@
 """Gramma — /start, /help, /connect + the OAuth entry point.
 
-v2 adds hard tenant limits (3 pages / user, 5 pages total in dev) enforced
-right here at connection time, plus a Mini-App "پنل مدیریت" button.
+Hard limits (24 users · 24 pages total · 3 pages/user), enforced centrally
+in app/services/limits.py, are applied here at /start (user cap) and at
+connection time (per-user + total page caps).
 """
 
 from __future__ import annotations
@@ -29,7 +30,10 @@ from app.db.repositories import get_or_create_user
 from app.models import InstagramAccount, OAuthFlow
 from app.services.limits import (
     MAX_ACCOUNTS_PER_USER,
+    MAX_TOTAL_INSTAGRAM_ACCOUNTS,
+    MAX_TOTAL_USERS,
     can_connect_account,
+    can_register_user,
     count_accounts_for_user,
 )
 from app.services.meta.oauth import build_authorization_url
@@ -62,6 +66,16 @@ def _welcome_text(name: str, page_count: int) -> str:
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     async with SessionLocal() as session:
+        # Hard cap: at most MAX_TOTAL_USERS registered Telegram users.
+        allowed, reason = await can_register_user(session, message.from_user.id)
+        if not allowed:
+            await session.rollback()
+            await message.answer(
+                "⛔ ظرفیت کاربران ربات تکمیل شده است.\n"
+                f"حداکثر {MAX_TOTAL_USERS} کاربر می‌توانند به ربات وصل شوند.\n"
+                "لطفاً بعداً دوباره تلاش کنید."
+            )
+            return
         await get_or_create_user(
             session,
             message.from_user.id,
@@ -139,6 +153,17 @@ async def cb_connect_page(callback: CallbackQuery):
 async def _start_connect(message: Message):
     """Enforce limits, then create a pending page + produce the OAuth link."""
     async with SessionLocal() as session:
+        # ── Hard cap: at most MAX_TOTAL_USERS registered users ──
+        allowed_user, u_reason = await can_register_user(session, message.from_user.id)
+        if not allowed_user:
+            await session.rollback()
+            await message.answer(
+                "⛔ ظرفیت کاربران ربات تکمیل شده است.\n"
+                f"حداکثر {MAX_TOTAL_USERS} کاربر می‌توانند به ربات وصل شوند.\n"
+                "لطفاً بعداً دوباره تلاش کنید."
+            )
+            return
+
         user = await get_or_create_user(
             session,
             message.from_user.id,
@@ -156,9 +181,15 @@ async def _start_connect(message: Message):
                     f"(حداکثر مجاز هر کاربر).\n"
                     "برای افزودن پیج جدید، ابتدا یک پیج را قطع کنید (/disconnect)."
                 )
+            elif reason == "user_total_limit":
+                await message.answer(
+                    "⛔ ظرفیت کاربران ربات تکمیل شده است.\n"
+                    f"حداکثر {MAX_TOTAL_USERS} کاربر می‌توانند به ربات وصل شوند."
+                )
             else:
                 await message.answer(
-                    "⛔ ظرفیت کل ربات تکمیل شده است (۵ پیج در حالت توسعه).\n"
+                    f"⛔ ظرفیت کل ربات تکمیل شده است "
+                    f"({MAX_TOTAL_INSTAGRAM_ACCOUNTS} پیج در حالت توسعه).\n"
                     "به‌زودی ظرفیت افزایش می‌یابد؛ لطفاً بعداً تلاش کنید."
                 )
             return

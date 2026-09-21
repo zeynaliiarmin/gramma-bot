@@ -58,7 +58,16 @@ export default function Pages() {
           </div>
         ))}
         <p style={{ fontSize: 11, color: 'var(--muted)', marginTop: 8 }}>
-          💡 حالت Development اپ متا: حداکثر ۳ پیج برای هر کاربر و ۵ پیج برای کل ربات.
+          {me.limits ? (
+            <>
+              💡 حالت Development اپ متا: حداکثر{' '}
+              <b>{me.limits.max_accounts_per_user}</b> پیج برای هر کاربر و{' '}
+              <b>{me.limits.max_total_instagram_accounts}</b> پیج برای کل ربات؛
+              حداکثر <b>{me.limits.max_total_users}</b> کاربر.
+            </>
+          ) : (
+            '💡 حالت Development اپ متا: حداکثر ۳ پیج برای هر کاربر و ۲۴ پیج برای کل ربات.'
+          )}
         </p>
       </div>
     </>

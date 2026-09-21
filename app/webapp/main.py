@@ -31,6 +31,7 @@ from app.services.autoreply import AutoReply
 from app.services.calendar import build_calendar
 from app.services.collab import CollabRequest, get_collab_for_user
 from app.services.insights import get_dashboard_snapshot
+from app.services.limits import get_limits
 from app.webapp.auth import MiniAppIdentity, resolve_miniapp_user
 
 settings = get_settings()
@@ -93,6 +94,11 @@ async def _account_dicts(user_id: int) -> list[dict]:
         return out
 
 
+def _with_limits(payload: dict, limits_dict: dict) -> dict:
+    """Attach the platform caps to a payload (Mini-App follows them too)."""
+    return {**payload, "limits": limits_dict}
+
+
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
@@ -100,17 +106,37 @@ async def healthz():
 
 @app.get("/api/me")
 async def api_me(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
+    from app.models import User
+    from app.services.limits import can_register_user
+
     async with SessionLocal() as session:
+        lim = await get_limits(session)
+        # Mini-App → same hard user cap as the bot (single source: limits.py).
+        allowed, reason = await can_register_user(session, ident.user_id)
+        if not allowed:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": (
+                        "ظرفیت کاربران ربات تکمیل شده است "
+                        f"(حداکثر {lim.max_users} کاربر)."
+                    ),
+                    "limits": lim.as_dict,
+                },
+            )
+        user = await session.get(User, ident.user_id)
         accounts = await get_accounts_for_user(session, ident.user_id)
-        user = await session.get(__import__("app.models", fromlist=["User"]).User, ident.user_id)
-        return {
-            "user_id": ident.user_id,
-            "name": user.full_name if user else str(ident.user_id),
-            "username": user.telegram_username if user else None,
-            "accounts": await _account_dicts(ident.user_id),
-            "connected_count": len([a for a in accounts if a.status == "connected"]),
-            "max_accounts": settings.max_accounts_per_user,
-        }
+        return _with_limits(
+            {
+                "user_id": ident.user_id,
+                "name": user.full_name if user else str(ident.user_id),
+                "username": user.telegram_username if user else None,
+                "accounts": await _account_dicts(ident.user_id),
+                "connected_count": len([a for a in accounts if a.status == "connected"]),
+                "max_accounts": lim.max_accounts_per_user,
+            },
+            lim.as_dict,
+        )
 
 
 @app.get("/api/accounts")
@@ -261,17 +287,21 @@ async def api_collab_respond(
 @app.get("/api/auto-replies")
 async def api_autoreplies(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
     async with SessionLocal() as session:
+        lim = await get_limits(session)
         accounts = await get_accounts_for_user(session, ident.user_id)
         ids = [a.id for a in accounts]
         if not ids:
-            return {"rules": []}
+            return _with_limits({"rules": []}, lim.as_dict)
         result = await session.execute(select(AutoReply).where(AutoReply.account_id.in_(ids)))
-        return {
-            "rules": [
-                {"id": r.id, "account_id": r.account_id, "keywords": r.keywords, "reply": r.reply, "enabled": r.enabled, "matches": r.matches}
-                for r in result.scalars()
-            ]
-        }
+        return _with_limits(
+            {
+                "rules": [
+                    {"id": r.id, "account_id": r.account_id, "keywords": r.keywords, "reply": r.reply, "enabled": r.enabled, "matches": r.matches}
+                    for r in result.scalars()
+                ]
+            },
+            lim.as_dict,
+        )
 
 
 @app.post("/api/auto-replies")

@@ -6,6 +6,7 @@ export default function Settings() {
   const [error, setError] = useState('')
   const [msg, setMsg] = useState('')
   const [form, setForm] = useState({ keywords: '', reply: '' })
+  const [limits, setLimits] = useState(null)
 
   async function load() {
     try {
@@ -16,7 +17,15 @@ export default function Settings() {
     }
   }
 
-  useEffect(() => { load() }, [])
+  async function loadLimits() {
+    // Platform caps come from the backend (single source: limits.py).
+    try {
+      const m = await api('/api/me')
+      if (m.limits) setLimits(m.limits)
+    } catch (_) { /* noop */ }
+  }
+
+  useEffect(() => { load(); loadLimits() }, [])
 
   async function addRule(e) {
     e.preventDefault()
@@ -77,8 +86,10 @@ export default function Settings() {
       <div className="card">
         <h3>⚙️ سقف‌های پلتفرم</h3>
         <p style={{ fontSize: 12, color: 'var(--muted)' }}>
-          • هر کاربر: حداکثر <b>۳ پیج</b><br />
-          • کل ربات (حالت توسعه): <b>۵ پیج</b><br />
+          • حداکثر کاربر: <b>{limits?.max_total_users ?? 24} کاربر</b><br />
+          • کل ربات (حالت توسعه):{' '}
+          <b>{limits?.max_total_instagram_accounts ?? 24} پیج</b><br />
+          • هر کاربر: حداکثر <b>{limits?.max_accounts_per_user ?? 3} پیج</b><br />
           • توکن‌ها: رمزنگاری AES-256 در دیتابیس<br />
           • پشتیبان‌گیری خودکار: هر شب
         </p>

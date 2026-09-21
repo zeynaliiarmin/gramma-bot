@@ -12,7 +12,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -85,8 +85,19 @@ class Settings(BaseSettings):
     # ── Misc ──────────────────────────────────────────────────
     log_level: str = "INFO"
     data_retention_days: int = 90
-    max_accounts_per_user: int = 3      # hard cap per Telegram user
-    max_total_accounts_dev: int = 24    # global cap in development mode
+    # ── Platform limits (hard caps, single source of truth) ──
+    # MAX_TOTAL_USERS: at most 24 Telegram users may register with the bot.
+    # MAX_TOTAL_INSTAGRAM_ACCOUNTS: at most 24 Instagram pages in total.
+    # MAX_ACCOUNTS_PER_USER: each user may connect at most 3 pages.
+    # (enforced centrally in app/services/limits.py — bot AND Mini-App).
+    max_total_users: int = 24
+    max_total_instagram_accounts: int = Field(
+        default=24,
+        validation_alias=AliasChoices(
+            "MAX_TOTAL_INSTAGRAM_ACCOUNTS", "MAX_TOTAL_ACCOUNTS_DEV"
+        ),
+    )
+    max_accounts_per_user: int = 3
     # Control flags for the v3 superpowers
     auto_backup_enabled: bool = True
     auto_backup_hour: int = 4           # local time for the nightly DB backup
