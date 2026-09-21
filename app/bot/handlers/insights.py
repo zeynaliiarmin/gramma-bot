@@ -60,6 +60,41 @@ async def cb_dashboard(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(F.data == "insights:ai")
+async def cb_ai_analysis(callback: CallbackQuery):
+    """AI page analytics & improvement suggestions — OpenClaw first."""
+    from app.services.insights import get_dashboard_snapshot
+    from app.services.openclaw import OpenClawError, analyze_page
+
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, callback.from_user.id)
+        if not accounts:
+            await callback.message.edit_text(tr(None, "no_accounts"), reply_markup=main_menu())
+            await callback.answer()
+            return
+        account = accounts[0]
+
+    await callback.answer()
+    await callback.message.answer("🧠 در حال تحلیل پیج شما…")
+    metrics = await get_dashboard_snapshot(account)
+    try:
+        analysis = await analyze_page(
+            metrics,
+            language="fa",
+            user_id=callback.from_user.id,
+            account_id=account.id,
+        )
+    except OpenClawError:
+        analysis = (
+            "⚠️ سرور هوش مصنوعی در دسترس نیست؛ تحلیل پایه:\n"
+            f"👥 فالوور: {metrics.get('followers', '—')}\n"
+            f"🖼 پست: {metrics.get('media_count', '—')}\n"
+            f"📈 روند: {metrics.get('trend', '—')}\n\n"
+            "پیشنهاد: انتشار منظم (۳-۴ پست در هفته) و تعامل فعال با کامنت‌ها."
+        )
+    await callback.message.answer(analysis, reply_markup=insights_menu())
+
+
 @router.callback_query(F.data == "insights:health")
 async def cb_health(callback: CallbackQuery):
     async with SessionLocal() as session:

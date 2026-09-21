@@ -51,14 +51,70 @@ async def cb_comments(callback: CallbackQuery):
 
     kb_buttons = []
     for c in comments[:8]:
-        label = f"💬 {c['username']}: {c['text'][:26]}"
-        kb_buttons.append([InlineKeyboardButton(text=label, callback_data=f"comment:reply:{c['id']}")])
+        label = f"💬 {c['username']}: {c['text'][:22]}"
+        kb_buttons.append([
+            InlineKeyboardButton(text=label, callback_data=f"comment:reply:{c['id']}"),
+            InlineKeyboardButton(text="✨", callback_data=f"comment:suggest:{c['id']}"),
+        ])
     kb_buttons.append([InlineKeyboardButton(text="◀️ بازگشت", callback_data="nav:community")])
     await callback.message.edit_text(
-        "💬 آخرین کامنت‌ها:\n(برای پاسخ، روی کامنت بزنید)",
+        "💬 آخرین کامنت‌ها:\n(💬 = پاسخ دادن، ✨ = پیشنهاد پاسخ هوشمند)",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_buttons),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("comment:suggest:"))
+async def cb_comment_suggest(callback: CallbackQuery):
+    """AI-suggested reply to a comment — routed through OpenClaw (fallback).
+    """
+    from app.services.openclaw import OpenClawError, suggest_comment_reply
+
+    comment_id = callback.data.split(":", 2)[2]
+    await callback.answer("در حال تولید پیشنهاد…")
+
+    comment_text = ""
+    username = ""
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, callback.from_user.id)
+        account = accounts[0] if accounts else None
+    if account is not None:
+        try:
+            comments = await InstagramService().list_comments(account, "demo_media")
+        except Exception:  # noqa: BLE001
+            comments = demo_comments
+        hit = next((c for c in comments if str(c.get("id")) == comment_id), None)
+        if hit:
+            comment_text = hit.get("text", "")
+            username = hit.get("username", "")
+
+    if not comment_text:
+        await callback.message.edit_text(
+            tr(None, "something_wrong"), reply_markup=community_menu()
+        )
+        return
+
+    try:
+        suggestion = await suggest_comment_reply(
+            comment_text,
+            username=username,
+            language="fa",
+            user_id=callback.from_user.id,
+            account_id=account.id if account else None,
+        )
+    except OpenClawError:
+        suggestion = _template_comment_reply(comment_text)
+
+    await callback.message.edit_text(
+        f"🎯 <b>پیشنهاد پاسخ هوشمند:</b>\n\n{suggestion}\n\n"
+        f"برای ارسال، روی کامنت بزنید و متن را بنویسید.",
+        reply_markup=community_menu(),
+    )
+
+
+def _template_comment_reply(comment_text: str) -> str:
+    """Safe built-in fallback when the AI brain is unreachable."""
+    return "ممنون از پیام شما! 🙏 خوشحالیم که این پست براتون مفید بوده."
 
 
 @router.callback_query(F.data.startswith("comment:reply:"))

@@ -75,6 +75,32 @@ Gramma v3 یک پلتفرم چندکاربره (Multi-Tenant) است که به �
 - **مینی‌اپ:** React + Vite + JavaScript/JSX + CSS مدرن (بدون CDN)
 - **استقرار:** Docker Compose (بک‌اند) + Vercel (مینی‌اپ)
 
+## 🧠 یکپارچه‌سازی OpenClaw (مغز هوش مصنوعی)
+
+OpenClaw به‌عنوان **مغز هوش مصنوعی محلی** روی همان سرور اجرا می‌شود؛ کاربر فقط
+یک ربات می‌بیند: **گراما**. اتصال از یک نقطه‌ی مرکزی انجام می‌شود:
+`app/services/openclaw.py` → `POST {OPENCLAW_BASE_URL}/api/ask`
+با بدنه‌ی `{message, context, task}` و پاسخ `{reply}`.
+
+**قواعد معماری (الزامی):**
+- کانال تلگرام OpenClaw همیشه غیرفعال است (`channels.telegram.enabled=false`) و OpenClaw هرگز تلگرام را poll نمی‌کند؛ **توکن تلگرام فقط متعلق به گراماست.**
+- تایم‌اوت = ۳۰ ثانیه؛ اگر OpenClaw در دسترس نباشد یا تایم‌اوت شود، گراما پیام مناسب (فارسی) نشان می‌دهد و به موتور الگویی/Tavily برمی‌گردد — **هرگز hang نمی‌شود.**
+- هر درخواست OpenClaw در `activity_logs` ثبت می‌شود (ردیابی مصرف).
+
+**شش قابلیت هوشمند که از OpenClaw عبور می‌کنند:**
+
+| # | قابلیت | نقطه اتصال |
+|---|---|---|
+| ۱ | تولید کپشن از متن کاربر | `generate_caption_via_openclaw` ← منوی «دستیار هوش مصنوعی» |
+| ۲ | پیشنهاد پاسخ به کامنت | `suggest_comment_reply` ← دکمه ✨ کنار هر کامنت |
+| ۳ | پیشنهاد پاسخ به دایرکت | `suggest_dm_reply` ← دکمه ✨ کنار هر گفتگو |
+| ۴ | ایده‌ی پست از موضوع | `generate_post_ideas` ← منوی «دستیار هوش مصنوعی» |
+| ۵ | جستجوی وب (Tavily متصل به OpenClaw) | `web_search_via_openclaw` ← منوی «دستیار هوش مصنوعی» |
+| ۶ | تحلیل پیج و پیشنهاد بهبود | `analyze_page` ← منوی «آمار و امنیت» |
+
+**تست واقعی:** `scripts/openclaw_smoke.py` هر شش قابلیت را در برابر یک OpenClaw
+واقعی اجرا و ثبت `activity_logs` را تأیید می‌کند.
+
 ---
 
 ## 🚀 اجرای محلی
@@ -163,8 +189,9 @@ docker compose up -d --build
 | `INSTAGRAM_ACCOUNT_MODE` | simulation / production |
 | `META_APP_ID` / `META_APP_SECRET` / `META_VERIFY_TOKEN` / `WEBHOOK_BASE_URL` | مشخصات متا |
 | `MAX_ACCOUNTS_PER_USER`=3 / `MAX_TOTAL_ACCOUNTS_DEV`=24 | محدودیت‌ها |
-| `AVALAI_API_KEY` / `AVALAI_MODEL` | تولید کپشن |
-| `TAVILY_API_KEY` | جستجوی وب |
+| `AVALAI_API_KEY` / `AVALAI_MODEL` | تولید کپشن (مسیر مستقیم / فال‌بک) |
+| `TAVILY_API_KEY` | جستجوی وب (فال‌بک مستقیم) |
+| `OPENCLAW_BASE_URL` / `OPENCLAW_TOKEN` / `OPENCLAW_TIMEOUT` | گیت‌وی هوش مصنوعی OpenClaw (پیش‌فرض `http://127.0.0.1:18789`، تایم‌اوت ۳۰ ثانیه) |
 | `AUTO_BACKUP_ENABLED` / `AUTO_BACKUP_HOUR` / `BACKUP_DIR` | بکاپ شبانه |
 | `SEMANTIC_SEARCH_ENABLED` / `SMART_NOTIFICATIONS_ENABLED` | پرچم‌های v3 |
 | `S3_*` | CDN رسانه (اختیاری) |

@@ -119,6 +119,7 @@ def insights_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     for text, cb in [
         ("📈 داشبورد", "insights:dashboard"),
+        ("🧠 تحلیل هوشمند پیج (AI)", "insights:ai"),
         ("🩺 گزارش سلامت پیج", "insights:health"),
         ("🛡 گزارش امنیتی", "insights:security"),
     ]:
@@ -156,7 +157,10 @@ def caption_actions(account_id: int) -> InlineKeyboardMarkup:
 def ai_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text="✨ تولید کپشن", callback_data="ai:pick")
+    b.button(text="💡 ایده پست از موضوع", callback_data="ai:ideas")
+    b.button(text="🌐 جستجوی وب (AI)", callback_data="ai:websearch")
     b.button(text="🤖 دسته‌بندی هوشمند دایرکت", callback_data="direct:categorize")
+    b.adjust(1)
     b.row(*back())
     return b.as_markup()
 

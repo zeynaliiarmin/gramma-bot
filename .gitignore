@@ -38,3 +38,8 @@ backups/
 # ── Node (miniapp) ─────────────────────
 miniapp/node_modules/
 miniapp/dist/
+
+# Node for the OpenClaw bridge plugin (keep its built dist/)
+openclaw/gramma-bridge/node_modules/
+!openclaw/gramma-bridge/dist/
+!openclaw/gramma-bridge/dist/**

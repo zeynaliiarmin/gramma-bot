@@ -59,14 +59,34 @@ async def generate_caption(
     tone: str = "friendly",
     language: str = "en",
     hashtags: bool = True,
+    user_id: int | None = None,
+    account_id: int | None = None,
 ) -> str:
-    """Generate a caption (LLM when available, template fallback otherwise)."""
+    """Generate a caption.
+
+    Priority: OpenClaw gateway → AvalAI (direct) → built-in template.
+    Any failure degrades gracefully to the next layer; the bot never hangs.
+    """
+    # 1) OpenClaw (the centralized AI brain)
+    if settings.openclaw_base_url:
+        try:
+            from app.services.openclaw import generate_caption_via_openclaw
+
+            return await generate_caption_via_openclaw(
+                prompt, tone=tone, language=language, hashtags=hashtags,
+                user_id=user_id, account_id=account_id,
+            )
+        except Exception:  # noqa: BLE001 — fall through to next engine
+            pass
+
+    # 2) AvalAI / OpenAI-compatible direct
     if settings.ai_api_key:
         try:
             return await _generate_caption_llm(prompt, tone, language, hashtags)
         except Exception:
-            # Never break publishing because the AI is down → fallback.
             pass
+
+    # 3) Offline template
     return _generate_caption_template(prompt, tone, language, hashtags)
 
 

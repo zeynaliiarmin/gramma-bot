@@ -59,15 +59,66 @@ async def cb_inbox(callback: CallbackQuery):
     kb_buttons = []
     for conv in conversations[:8]:
         name = conv.get("name") or f"thread {conv['id']}"
-        kb_buttons.append(
-            [InlineKeyboardButton(text=f"💬 {name}", callback_data=f"dm:reply:{conv['id']}")]
-        )
+        kb_buttons.append([
+            InlineKeyboardButton(text=f"💬 {name}", callback_data=f"dm:reply:{conv['id']}"),
+            InlineKeyboardButton(text="✨", callback_data=f"dm:suggest:{conv['id']}"),
+        ])
     kb_buttons.append([InlineKeyboardButton(text="◀️ بازگشت", callback_data="nav:direct")])
     await callback.message.edit_text(
-        "📥 گفتگوهای اخیر:\n(برای پاسخ، روی گفتگو بزنید)",
+        "📥 گفتگوهای اخیر:\n(💬 = پاسخ دادن، ✨ = پیشنهاد پاسخ هوشمند)",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_buttons),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("dm:suggest:"))
+async def cb_dm_suggest(callback: CallbackQuery):
+    """AI-suggested reply to a DM — routed through OpenClaw (fallback)."""
+    from app.services.openclaw import OpenClawError, suggest_dm_reply
+
+    thread_id = callback.data.split(":", 2)[2]
+    await callback.answer("در حال تولید پیشنهاد…")
+
+    last_message = ""
+    sender = ""
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, callback.from_user.id)
+        account = accounts[0] if accounts else None
+    if account is not None:
+        try:
+            conversations = await InstagramService().list_conversations(account)
+        except Exception:  # noqa: BLE001
+            conversations = [
+                {"id": f"sim_t{i}", "name": f"کاربر {i}", "last_message": s}
+                for i, s in enumerate(demo_subjects, start=1)
+            ]
+        hit = next((c for c in conversations if str(c.get("id")) == thread_id), None)
+        if hit:
+            last_message = hit.get("last_message", "")
+            sender = hit.get("name", "")
+
+    if not last_message:
+        await callback.message.edit_text(
+            tr(None, "something_wrong"), reply_markup=direct_menu()
+        )
+        return
+
+    try:
+        suggestion = await suggest_dm_reply(
+            last_message,
+            sender_name=sender,
+            language="fa",
+            user_id=callback.from_user.id,
+            account_id=account.id if account else None,
+        )
+    except OpenClawError:
+        suggestion = "سلام! ممنون از پیام شما 🙏 به‌زودی پاسخ کامل را ارسال می‌کنیم."
+
+    await callback.message.edit_text(
+        f"🎯 <b>پیشنهاد پاسخ هوشمند:</b>\n\n{suggestion}\n\n"
+        f"برای ارسال، روی گفتگو بزنید و متن را بنویسید.",
+        reply_markup=direct_menu(),
+    )
 
 
 @router.callback_query(F.data.startswith("dm:reply:"))

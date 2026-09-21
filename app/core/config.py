@@ -67,6 +67,14 @@ class Settings(BaseSettings):
     openai_base_url: str = ""
     tavily_api_key: str = ""
 
+    # ── OpenClaw AI gateway (local HTTP, Telegram channel disabled) ──
+    # OpenClaw runs on the same server as an HTTP gateway (DeepSeek/AvalAI).
+    # Gramma is the ONLY client — and the ONLY owner of the Telegram token.
+    # OPENCLAW_BASE_URL="" → feature disabled (template fallbacks used).
+    openclaw_base_url: str = "http://127.0.0.1:18789"
+    openclaw_token: str = ""
+    openclaw_timeout: float = 30.0
+
     # ── Media CDN (optional) ─────────────────────────────────
     s3_bucket: str = ""
     s3_endpoint: str = ""

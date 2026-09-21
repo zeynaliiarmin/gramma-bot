@@ -1,0 +1,14 @@
+{
+  "id": "gramma-bridge",
+  "name": "Gramma AI Bridge",
+  "description": "Exposes POST /api/ask on the OpenClaw gateway so the Gramma bot can query the AI brain.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "activation": {
+    "onStartup": true
+  }
+}

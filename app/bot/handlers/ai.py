@@ -36,6 +36,22 @@ async def cb_ai_pick(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+@router.callback_query(F.data == "ai:ideas")
+async def cb_ai_ideas(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(TextWait.waiting)
+    await state.update_data(topic_target="post_ideas")
+    await callback.message.edit_text("💡 موضوعی که می‌خواهید برایش ایده پست بگیرید را بنویسید:")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ai:websearch")
+async def cb_ai_websearch(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(TextWait.waiting)
+    await state.update_data(topic_target="websearch")
+    await callback.message.edit_text("🌐 موضوعی برای جستجوی وب بنویسید:")
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("ai:caption:"))
 async def cb_ai_caption(callback: CallbackQuery, state: FSMContext):
     account_id = int(callback.data.split(":")[2])
@@ -63,7 +79,9 @@ async def text_entered(message: Message, state: FSMContext):
         language = "fa" if target == "caption_fa" else "en"
         prompt = message.text or ""
         await message.answer("✨ در حال تولید کپشن…")
-        caption = await generate_caption(prompt, tone="friendly", language=language)
+        caption = await generate_caption(
+            prompt, tone="friendly", language=language, user_id=message.from_user.id
+        )
         await message.answer(caption)
         account_id = data.get("account_id") or await _first_account(message)
         if account_id:
@@ -112,12 +130,44 @@ async def text_entered(message: Message, state: FSMContext):
             )
         await message.answer(format_hits(hits))
     elif target == "websearch":
-        # Web research (Tavily), used for content inspiration.
+        # Web research — OpenClaw (Tavily) first, direct Tavily fallback.
+        from app.services.openclaw import OpenClawError, web_search_via_openclaw
         from app.services.web_search import format_web_results, web_search
 
         await message.answer("🔎 در حال جستجوی وب…")
-        results = await web_search(message.text or "", max_results=5)
-        await message.answer(format_web_results(message.text or "", results))
+        try:
+            summary = await web_search_via_openclaw(
+                message.text or "", language="fa", user_id=message.from_user.id
+            )
+            await message.answer(summary)
+        except OpenClawError:
+            # OpenClaw unavailable → immediate direct-Tavily fallback (no hang).
+            results = await web_search(message.text or "", max_results=5)
+            await message.answer(
+                "⚠️ سرور هوش مصنوعی در دسترس نیست؛ از جستجوی مستقیم استفاده شد.\n\n"
+                + format_web_results(message.text or "", results)
+            )
+    elif target == "post_ideas":
+        # Post ideas — OpenClaw first, graceful fallback otherwise.
+        from app.services.openclaw import OpenClawError, generate_post_ideas
+
+        await message.answer("💡 در حال تولید ایده‌ها…")
+        topic = (message.text or "").strip()
+        try:
+            ideas = await generate_post_ideas(
+                topic, count=5, language="fa", user_id=message.from_user.id
+            )
+        except OpenClawError as exc:
+            ideas = (
+                "⚠️ سرور هوش مصنوعی در دسترس نیست.\n"
+                "نمونه ایده برای شروع:\n"
+                "1. پشت‌صحنه کار خود را نشان دهید\n"
+                "2. معرفی محصول با زاویه جدید\n"
+                "3. پاسخ به سوالات پرتکرار فالوورها\n"
+                "4. نظرسنجی و چالش با فالوورها\n"
+                "5. معرفی مشتریان و نظرات آن‌ها"
+            )
+        await message.answer(ideas)
     elif target == "template_title":
         # Fill a chosen post template.
         from app.services.templates import render_template
