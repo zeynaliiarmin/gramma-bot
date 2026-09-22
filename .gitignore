@@ -43,3 +43,7 @@ miniapp/dist/
 openclaw/gramma-bridge/node_modules/
 !openclaw/gramma-bridge/dist/
 !openclaw/gramma-bridge/dist/**
+
+# Vercel local link state (contains project/org ids — not secrets, but noisy)
+.vercel/
+.vercel
