@@ -46,6 +46,10 @@
       "dest": "/miniapp/dist/assets/$1"
     },
     {
+      "src": "/",
+      "dest": "/miniapp/dist/index.html"
+    },
+    {
       "src": "/(.*)",
       "dest": "/miniapp/dist/$1"
     }
