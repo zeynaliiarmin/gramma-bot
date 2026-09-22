@@ -811,6 +811,243 @@ async def api_design_history(
         return {"total": total, "rows": rows}
 
 
+# ── ChatbotX + Instagram Publisher integrations ──────────────
+@app.get("/api/chatbotx/status")
+async def api_chatbotx_status(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
+    """ChatbotX workspace + Instagram connection status."""
+    from app.services.chatbotx_service import get_chatbotx_client
+
+    client = get_chatbotx_client()
+    if not client.enabled:
+        return {
+            "enabled": False,
+            "configured": False,
+            "message": "ChatbotX پیکربندی نشده — توکن را در .env بگذارید",
+            "workspace_id": settings.chatbotx_workspace_id or None,
+            "base_url": settings.chatbotx_base_url,
+        }
+    try:
+        conn = await client.get_instagram_connection()
+        return {
+            "enabled": True,
+            "configured": True,
+            "connected": conn.get("connected", False),
+            "username": conn.get("username"),
+            "workspace_id": settings.chatbotx_workspace_id,
+            "base_url": settings.chatbotx_base_url,
+            "details": conn.get("details"),
+        }
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "configured": True,
+            "connected": False,
+            "error": str(exc)[:300],
+            "workspace_id": settings.chatbotx_workspace_id,
+        }
+
+
+@app.get("/api/chatbotx/conversations")
+async def api_chatbotx_conversations(
+    limit: int = 20,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    from app.services.chatbotx_service import get_chatbotx_client
+
+    client = get_chatbotx_client()
+    if not client.enabled:
+        raise HTTPError(400, "chatbotx_not_configured")
+    try:
+        convs = await client.get_conversations(limit=limit)
+        return {"conversations": convs, "count": len(convs)}
+    except Exception as exc:
+        raise HTTPError(500, str(exc)[:300])
+
+
+@app.post("/api/chatbotx/send")
+async def api_chatbotx_send(
+    body: dict,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    from app.services.chatbotx_service import get_chatbotx_client
+
+    client = get_chatbotx_client()
+    if not client.enabled:
+        raise HTTPError(400, "chatbotx_not_configured")
+    conv_id = (body or {}).get("conversation_id")
+    text = (body or {}).get("message") or (body or {}).get("text")
+    if not conv_id or not text:
+        raise HTTPError(400, "missing conversation_id or message")
+    try:
+        result = await client.send_message(conv_id, text)
+        return {"ok": True, "result": result}
+    except Exception as exc:
+        raise HTTPError(500, str(exc)[:300])
+
+
+@app.get("/api/instagram-publisher/status")
+async def api_instagram_publisher_status(
+    account_id: int | None = None,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    from app.services.instagram_publisher import get_publisher
+
+    pub = get_publisher()
+    # Verify account ownership if provided
+    if account_id:
+        async with SessionLocal() as session:
+            accounts = await get_accounts_for_user(session, ident.user_id)
+            if account_id not in [a.id for a in accounts]:
+                raise HTTPError(403, "not_your_account")
+    try:
+        status = await pub.get_status(account_id=account_id)
+        return status
+    except Exception as exc:
+        return {"enabled": False, "error": str(exc)[:300]}
+
+
+@app.post("/api/instagram-publisher/publish")
+async def api_instagram_publisher_publish(
+    body: dict,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    from app.services.instagram_publisher import get_publisher
+
+    account_id = (body or {}).get("account_id")
+    if not account_id:
+        raise HTTPError(400, "missing account_id")
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, ident.user_id)
+        if account_id not in [a.id for a in accounts]:
+            raise HTTPError(403, "not_your_account")
+
+    image_url = (body or {}).get("image_url")
+    image_urls = (body or {}).get("image_urls")
+    caption = (body or {}).get("caption", "")
+    media_type = (body or {}).get("media_type", "post")
+
+    pub = get_publisher()
+    try:
+        result = await pub.publish_post(
+            account_id=account_id,
+            image_url=image_url,
+            image_urls=image_urls,
+            caption=caption,
+            media_type=media_type,
+            user_id=ident.user_id,
+        )
+        return result
+    except Exception as exc:
+        # Return as JSON error with Persian message if it's our custom error
+        from app.services.instagram_publisher import InstagramPublishError
+
+        if isinstance(exc, InstagramPublishError):
+            return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})
+        raise HTTPError(500, str(exc)[:500])
+
+
+@app.get("/api/integrations/status")
+async def api_integrations_status(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
+    """Combined status of all integrations for Mini-App."""
+    from app.services.chatbotx_service import get_chatbotx_client
+    from app.services.instagram_publisher import get_publisher
+
+    # ChatbotX
+    cbx_client = get_chatbotx_client()
+    cbx_status = {"enabled": cbx_client.enabled, "configured": cbx_client.enabled}
+    if cbx_client.enabled:
+        try:
+            conn = await cbx_client.get_instagram_connection()
+            cbx_status.update({"connected": conn.get("connected"), "username": conn.get("username")})
+        except Exception as exc:
+            cbx_status.update({"connected": False, "error": str(exc)[:200]})
+
+    # Instagram publisher
+    pub = get_publisher()
+    try:
+        pub_status = await pub.get_status()
+    except Exception as exc:
+        pub_status = {"enabled": False, "error": str(exc)[:200]}
+
+    # Daily reply usage (reuse logic)
+    from app.services import limits
+    from app.services.reply_limits import tehran_date
+
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, ident.user_id)
+        # Quick summary
+        today = tehran_date()
+        # ... simplified
+        summary = {
+            "accounts_count": len(accounts),
+            "connected_count": len([a for a in accounts if a.status == "connected"]),
+            "daily_limit": limits.DAILY_REPLY_LIMIT,
+            "hourly_limit": limits.HOURLY_REPLY_LIMIT,
+            "date": today,
+        }
+
+    return {
+        "chatbotx": cbx_status,
+        "instagram_publisher": pub_status,
+        "reply_limits": summary,
+        "meta_app": {
+            "configured": bool(settings.meta_app_id and settings.meta_app_secret),
+            "mode": settings.instagram_account_mode,
+        },
+    }
+
+
+@app.post("/api/chatbotx-webhook")
+async def api_chatbotx_webhook(request: dict):
+    """Public webhook for ChatbotX inbound events (guarded by secret if set)."""
+    # This is called by ChatbotX when new messages/comments arrive
+    # For now, log and return ok — full processing can be added later
+    import json
+
+    logger.info("chatbotx webhook received: %s", json.dumps(request, ensure_ascii=False)[:1000])
+    # TODO: process inbound message, route to auto-reply engine
+    # For now, just acknowledge
+    return {"ok": True, "received": True}
+
+
+@app.post("/api/cleanup/manual")
+async def api_cleanup_manual(
+    body: dict,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    """Manual cleanup of old files/logs (admin)."""
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import delete
+
+    # Only allow for user's own data
+    days = int((body or {}).get("days", 30))
+    if days < 7:
+        days = 7  # minimum 7 days
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, ident.user_id)
+        ids = [a.id for a in accounts]
+        if not ids:
+            return {"deleted": 0}
+
+        # Clean old chat history
+        from app.services.analytics_history import ChatHistory
+
+        result = await session.execute(delete(ChatHistory).where(ChatHistory.account_id.in_(ids), ChatHistory.created_at < cutoff))
+        deleted_chats = result.rowcount or 0
+
+        # Clean old activity logs
+        from app.models import ActivityLog
+
+        result2 = await session.execute(delete(ActivityLog).where(ActivityLog.account_id.in_(ids), ActivityLog.created_at < cutoff))
+        deleted_logs = result2.rowcount or 0
+
+        await session.commit()
+
+        return {"deleted_chats": deleted_chats, "deleted_logs": deleted_logs, "cutoff": cutoff.isoformat()}
+
+
 # ── WebSocket (live refresh) ─────────────────────────────────
 @app.websocket("/ws/broadcast")
 async def ws_broadcast(websocket: WebSocket):

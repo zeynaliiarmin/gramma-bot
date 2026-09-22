@@ -75,6 +75,24 @@ class Settings(BaseSettings):
     openclaw_token: str = ""
     openclaw_timeout: float = 30.0
 
+    # ── ChatbotX (Instagram automation via Login with Instagram) ──
+    # ChatbotX is the primary messaging automation platform that bypasses
+    # Meta App Review / sanctions by using Login with Instagram OAuth.
+    chatbotx_workspace_token: str = ""
+    chatbotx_base_url: str = "https://app.chatbotx.io/api"
+    chatbotx_workspace_id: str = ""
+    chatbotx_webhook_secret: str = ""
+    chatbotx_enabled: bool = False
+
+    # ── Instagram Publishing via OpenClaw private-enabled (instagrapi) ──
+    # When enabled, Gramma can publish posts/stories/reels via instagrapi
+    # (private Instagram API) without a Meta app. Risky — must be rate-limited.
+    instagram_publish_enabled: bool = False
+    instagram_publish_daily_limit: int = 3  # max 3 posts/day per page for safety
+    instagram_publish_mode: str = "private-enabled"  # private-enabled | disabled
+    instagram_username: str = ""  # for instagrapi login (stored encrypted in prod)
+    instagram_password: str = ""
+
     # ── Media CDN (optional) ─────────────────────────────────
     s3_bucket: str = ""
     s3_endpoint: str = ""
