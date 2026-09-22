@@ -191,3 +191,25 @@ textarea.input { min-height: 70px; resize: vertical; }
   border-radius: 50%; background: var(--brand);
 }
 .cal-cell.sel .dot { background: #fff; }
+
+/* ── Automation builder ─────────────────────────────────────── */
+.btn.small { padding: 5px 12px; font-size: 11.5px; }
+.btn.ghost { background: var(--panel); color: var(--ink); border: 1px solid var(--line); }
+.btn.danger { background: #fde8ec; color: var(--danger); }
+[data-theme='dark'] .btn.ghost { background: #1d2130; }
+[data-theme='dark'] .btn.danger { background: #3a1d26; }
+
+.step-box {
+  border: 1px solid var(--line); border-radius: 12px;
+  padding: 10px; margin-bottom: 10px; background: var(--bg-bis, var(--bg));
+}
+.step-num {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; border-radius: 8px; flex: 0 0 auto;
+  background: var(--brand-soft); color: var(--brand); font-weight: 700; font-size: 12px;
+}
+.preview-bubble { background: var(--bg-bis, var(--bg)); border-radius: 12px; padding: 10px; }
+.bubble.bot {
+  background: var(--brand); color: #fff; padding: 10px 14px;
+  border-radius: 14px; font-size: 13px; white-space: pre-wrap;
+}

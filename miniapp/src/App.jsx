@@ -6,6 +6,7 @@ import Dashboard from './components/Dashboard.jsx'
 import Pages from './components/Pages.jsx'
 import Calendar from './components/Calendar.jsx'
 import Collab from './components/Collab.jsx'
+import Automation from './components/Automation.jsx'
 import Settings from './components/Settings.jsx'
 
 const TABS = [
@@ -13,6 +14,7 @@ const TABS = [
   { id: 'pages', label: 'پیج‌ها', icon: '🔗' },
   { id: 'calendar', label: 'تقویم', icon: '📅' },
   { id: 'collab', label: 'کلبریشن', icon: '🤝' },
+  { id: 'automation', label: 'اتوماسیون', icon: '🤖' },
 ]
 
 export default function App() {
@@ -121,6 +123,7 @@ export default function App() {
       {tab === 'pages' && <Pages />}
       {tab === 'calendar' && <Calendar />}
       {tab === 'collab' && <Collab />}
+      {tab === 'automation' && <Automation />}
       {tab === 'settings' && <Settings />}
 
       <nav className="bottom-nav">

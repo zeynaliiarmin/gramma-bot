@@ -28,12 +28,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.database import Base
-
-# Auto-incrementing primary key that works on BOTH backends:
-#   * PostgreSQL → BIGINT (IDENTITY / BIGSERIAL)
-#   * SQLite     → INTEGER PRIMARY KEY (the only auto-incrementing type there)
-BIGINT_PK = BigInteger().with_variant(Integer, "sqlite")
+from app.core.database import Base, BIGINT_PK  # noqa: F401  (re-export for compat)
 
 
 def utcnow() -> datetime:

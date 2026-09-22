@@ -103,14 +103,39 @@ async def _consume_and_record_event(payload: dict) -> None:
                     thread_id = value.get("sender", {}).get("id") or value.get("thread_id")
 
                 if acc and dm_text:
+                    from app.services.analytics_history import record_chat
                     from app.services.autoreply import find_reply
 
-                    reply = await find_reply(session, acc.id, dm_text)
-                    if not reply:
-                        # v3: AI-drafted reply fallback
+                    reply = None
+                    reply_source = "none"
+
+                    # 1) Multi-step automation scenarios (keyword / AI / always).
+                    from app.services.automation import Outcome, process_inbound
+
+                    outcome = await process_inbound(
+                        session, acc.id, "dm", thread_id or "", dm_text
+                    )
+                    if outcome is not None:
+                        if outcome.send_text:
+                            reply = outcome.send_text
+                            reply_source = "scenario"
+                        elif outcome.final:
+                            reply_source = "scenario_done"
+
+                    # 2) Classic keyword AutoReply rules.
+                    if reply is None:
+                        reply = await find_reply(session, acc.id, dm_text)
+                        if reply:
+                            reply_source = "keyword"
+
+                    # 3) AI-drafted fallback.
+                    if reply is None:
                         from app.services.ai import draft_reply
 
                         reply = await draft_reply(dm_text, locale="fa")
+                        if reply:
+                            reply_source = "ai"
+
                     if reply and thread_id:
                         try:
                             await InstagramService().send_dm(acc, thread_id, reply)
@@ -118,6 +143,16 @@ async def _consume_and_record_event(payload: dict) -> None:
                             logger.warning("auto-reply failed: %s", exc)
                         else:
                             text += " auto_replied=1"
+
+                    await record_chat(
+                        session,
+                        account_id=acc.id,
+                        channel="dm",
+                        peer_id=thread_id or "",
+                        inbound_text=dm_text,
+                        reply_text=reply or "",
+                        reply_source=reply_source,
+                    )
 
                 session.add(
                     ActivityLog(

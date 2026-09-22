@@ -27,6 +27,19 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.db.repositories import get_accounts_for_user
 from app.models import Post
+from app.services.analytics_history import ChatHistory, DesignHistory, record_chat, record_design
+from app.services.automation import (
+    AutomationScenario,
+    AutomationSession,
+    AutomationStep,
+    MatchMode,
+    Outcome,
+    ScenarioChannel,
+    StepAction,
+    get_scenarios,
+    get_steps,
+    process_inbound,
+)
 from app.services.autoreply import AutoReply
 from app.services.calendar import build_calendar
 from app.services.collab import CollabRequest, get_collab_for_user
@@ -373,6 +386,290 @@ async def api_autoreply_add(
         )
         await session.commit()
         return {"ok": True, "id": rule.id}
+
+
+# ── Automation scenarios (multi-step auto-reply) ─────────────
+def _scenario_dict(s: AutomationScenario) -> dict:
+    return {
+        "id": s.id,
+        "account_id": s.account_id,
+        "name": s.name,
+        "channel": s.channel,
+        "match_mode": s.match_mode,
+        "trigger_text": s.trigger_text,
+        "ai_instruction": s.ai_instruction,
+        "fallback_reply": s.fallback_reply,
+        "use_ai": s.use_ai,
+        "enabled": s.enabled,
+        "priority": s.priority,
+        "hits": s.hits,
+        "triggers": s.triggers,
+    }
+
+
+def _step_dict(st: AutomationStep) -> dict:
+    return {
+        "id": st.id,
+        "scenario_id": st.scenario_id,
+        "order_index": st.order_index,
+        "action": st.action,
+        "text": st.text,
+        "use_ai": st.use_ai,
+        "next_step_order": st.next_step_order,
+        "variable": st.variable,
+    }
+
+
+@app.get("/api/automation/scenarios")
+async def api_scenarios_list(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
+    """All scenarios for the user's accounts (with their steps)."""
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, ident.user_id)
+        ids = [a.id for a in accounts]
+        if not ids:
+            return {"scenarios": []}
+        scenarios = []
+        for a_id in ids:
+            for sc in await get_scenarios(session, a_id, only_enabled=False):
+                steps = await get_steps(session, sc.id)
+                scenarios.append({**_scenario_dict(sc), "steps": [_step_dict(st) for st in steps]})
+        return {"scenarios": scenarios}
+
+
+@app.post("/api/automation/scenarios")
+async def api_scenario_create(
+    body: dict,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    """Create a scenario (optionally with its steps in one shot)."""
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, ident.user_id)
+        if not accounts:
+            raise HTTPError(400, "no_accounts")
+        account_id = (body or {}).get("account_id") or accounts[0].id
+        if account_id not in [a.id for a in accounts]:
+            raise HTTPError(403, "not_your_account")
+
+        sc = AutomationScenario(
+            account_id=account_id,
+            name=(body or {}).get("name", "سناریوی جدید"),
+            channel=(body or {}).get("channel", ScenarioChannel.DM),
+            match_mode=(body or {}).get("match_mode", MatchMode.KEYWORD),
+            trigger_text=(body or {}).get("trigger_text", ""),
+            ai_instruction=(body or {}).get("ai_instruction", ""),
+            fallback_reply=(body or {}).get("fallback_reply", ""),
+            use_ai=bool((body or {}).get("use_ai", True)),
+            enabled=bool((body or {}).get("enabled", True)),
+            priority=int((body or {}).get("priority", 0) or 0),
+        )
+        session.add(sc)
+        await session.flush()
+        for i, st in enumerate((body or {}).get("steps", []) or []):
+            session.add(
+                AutomationStep(
+                    scenario_id=sc.id,
+                    order_index=i,
+                    action=st.get("action", StepAction.SEND),
+                    text=st.get("text", ""),
+                    use_ai=bool(st.get("use_ai", False)),
+                    next_step_order=st.get("next_step_order"),
+                    variable=st.get("variable", ""),
+                )
+            )
+        await session.commit()
+        return {"ok": True, "id": sc.id}
+
+
+@app.patch("/api/automation/scenarios/{sid}")
+async def api_scenario_update(
+    sid: int,
+    body: dict,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    """Update scenario fields + replace its steps atomically."""
+    async with SessionLocal() as session:
+        sc = await session.get(AutomationScenario, sid)
+        if sc is None:
+            raise HTTPError(404, "not_found")
+        accounts = await get_accounts_for_user(session, ident.user_id)
+        if sc.account_id not in [a.id for a in accounts]:
+            raise HTTPError(403, "not_your_account")
+
+        for field in ("name", "channel", "match_mode", "trigger_text", "ai_instruction", "fallback_reply"):
+            if field in body:
+                setattr(sc, field, body[field])
+        for field in ("use_ai", "enabled"):
+            if field in body:
+                setattr(sc, field, bool(body[field]))
+        if "priority" in body:
+            sc.priority = int(body["priority"] or 0)
+
+        if "steps" in body:
+            existing = await get_steps(session, sc.id)
+            for st in existing:
+                await session.delete(st)
+            await session.flush()
+            for i, st in enumerate((body["steps"] or [])):
+                session.add(
+                    AutomationStep(
+                        scenario_id=sc.id,
+                        order_index=i,
+                        action=st.get("action", StepAction.SEND),
+                        text=st.get("text", ""),
+                        use_ai=bool(st.get("use_ai", False)),
+                        next_step_order=st.get("next_step_order"),
+                        variable=st.get("variable", ""),
+                    )
+                )
+        await session.commit()
+        steps = await get_steps(session, sc.id)
+        return {"ok": True, "scenario": {**_scenario_dict(sc), "steps": [_step_dict(st) for st in steps]}}
+
+
+@app.delete("/api/automation/scenarios/{sid}")
+async def api_scenario_delete(
+    sid: int,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    async with SessionLocal() as session:
+        sc = await session.get(AutomationScenario, sid)
+        if sc is None:
+            raise HTTPError(404, "not_found")
+        accounts = await get_accounts_for_user(session, ident.user_id)
+        if sc.account_id not in [a.id for a in accounts]:
+            raise HTTPError(403, "not_your_account")
+        # Explicitly remove children (SQLite doesn't enforce FK cascade).
+        for st in await get_steps(session, sc.id):
+            await session.delete(st)
+        from sqlalchemy import delete
+
+        await session.execute(
+            delete(AutomationSession).where(AutomationSession.scenario_id == sc.id)
+        )
+        await session.delete(sc)
+        await session.commit()
+        return {"ok": True}
+
+
+@app.post("/api/automation/preview")
+async def api_scenario_preview(
+    body: dict,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    """Dry-run a scenario definition against a sample message (no mutation)."""
+    from app.services.automation import get_steps as _gs
+
+    steps_data = (body or {}).get("steps") or []
+    sample = (body or {}).get("sample") or "قیمت؟"
+    channel = (body or {}).get("channel") or ScenarioChannel.DM
+    text = (body or {}).get("trigger_text", "")
+    match_mode = (body or {}).get("match_mode", MatchMode.KEYWORD)
+    fallback = (body or {}).get("fallback_reply", "")
+    ai_instruction = (body or {}).get("ai_instruction", "")
+
+    # Build an in-memory scenario + steps (not persisted).
+    sc = AutomationScenario(
+        id=0, account_id=-1, name="(پیش‌نمایش)", channel=channel,
+        match_mode=match_mode, trigger_text=text, fallback_reply=fallback,
+        ai_instruction=ai_instruction, use_ai=True, enabled=True, priority=0, hits=0,
+    )
+    steps = [
+        AutomationStep(
+            id=0, scenario_id=0, order_index=i,
+            action=st.get("action", StepAction.SEND), text=st.get("text", ""),
+            use_ai=bool(st.get("use_ai", False)),
+            next_step_order=st.get("next_step_order"), variable=st.get("variable", ""),
+        )
+        for i, st in enumerate(steps_data)
+    ]
+    from app.services.automation import _run_from
+
+    outcome = await _run_from(None, sc, steps, 0, sample, {})
+    return {
+        "matched": True,
+        "reply": outcome.send_text,
+        "final": outcome.final,
+        "waiting": outcome.waiting,
+    }
+
+
+# ── Chat & design history (stages 2 & 4) ─────────────────────
+@app.get("/api/chat-history")
+async def api_chat_history(
+    channel: str | None = None,
+    page: int = 0,
+    per_page: int = 50,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    from sqlalchemy import func
+
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, ident.user_id)
+        ids = [a.id for a in accounts]
+        if not ids:
+            return {"total": 0, "rows": []}
+        q = select(ChatHistory).where(ChatHistory.account_id.in_(ids))
+        if channel:
+            q = q.where(ChatHistory.channel == channel)
+        total = (await session.execute(select(func.count()).select_from(q.subquery()))).scalar() or 0
+        q = q.order_by(ChatHistory.created_at.desc()).offset(page * per_page).limit(per_page)
+        rows = [
+            {
+                "id": r.id, "account_id": r.account_id, "channel": r.channel,
+                "peer_id": r.peer_id, "peer_name": r.peer_name,
+                "inbound_text": r.inbound_text, "reply_text": r.reply_text,
+                "reply_source": r.reply_source,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "created_jalali": jalali.to_jalali_str(r.created_at) if r.created_at else None,
+            }
+            for r in (await session.execute(q)).scalars()
+        ]
+        return {"total": total, "rows": rows}
+
+
+@app.delete("/api/chat-history")
+async def api_chat_history_clear(
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    """Delete the calling user's chat history."""
+    from sqlalchemy import delete
+
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, ident.user_id)
+        ids = [a.id for a in accounts]
+        if not ids:
+            return {"deleted": 0}
+        res = await session.execute(delete(ChatHistory).where(ChatHistory.account_id.in_(ids)))
+        await session.commit()
+        return {"deleted": res.rowcount or 0}
+
+
+@app.get("/api/design-history")
+async def api_design_history(
+    page: int = 0,
+    per_page: int = 50,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    from sqlalchemy import func
+
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, ident.user_id)
+        ids = [a.id for a in accounts]
+        q = select(DesignHistory).where(
+            (DesignHistory.account_id.in_(ids)) | (DesignHistory.account_id.is_(None))
+        )
+        total = (await session.execute(select(func.count()).select_from(q.subquery()))).scalar() or 0
+        q = q.order_by(DesignHistory.created_at.desc()).offset(page * per_page).limit(per_page)
+        rows = [
+            {
+                "id": r.id, "account_id": r.account_id, "kind": r.kind,
+                "prompt": r.prompt, "content": r.content, "engine": r.engine,
+                "language": r.language,
+                "created_jalali": jalali.to_jalali_str(r.created_at) if r.created_at else None,
+            }
+            for r in (await session.execute(q)).scalars()
+        ]
+        return {"total": total, "rows": rows}
 
 
 # ── WebSocket (live refresh) ─────────────────────────────────

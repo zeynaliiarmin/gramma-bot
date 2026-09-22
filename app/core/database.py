@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import AsyncIterator
 
+from sqlalchemy import BigInteger, Integer
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -19,6 +20,13 @@ from sqlalchemy.orm import declarative_base
 from app.core.config import get_settings
 
 settings = get_settings()
+
+# Auto-incrementing primary key that works on BOTH backends:
+#   * PostgreSQL → BIGINT (IDENTITY / BIGSERIAL)
+#   * SQLite     → INTEGER PRIMARY KEY (the only auto-incrementing type there)
+# Lives here (not in app.models) so service-layer models can import it without
+# creating an import cycle with the `app.models` package __init__.
+BIGINT_PK = BigInteger().with_variant(Integer, "sqlite")
 
 # SQLite needs this pragma to allow concurrent reads from background tasks.
 _engine_kwargs: dict = {"echo": False, "pool_pre_ping": True}

@@ -10,6 +10,12 @@ from app.models.core import (  # noqa: F401
     Post,
     User,
 )
+from app.services.analytics_history import ChatHistory, DesignHistory  # noqa: F401
+from app.services.automation import (  # noqa: F401
+    AutomationScenario,
+    AutomationSession,
+    AutomationStep,
+)
 from app.services.autoreply import AutoReply  # noqa: F401
 from app.services.collab import CollabRequest  # noqa: F401
 from app.services.templates import PostTemplate  # noqa: F401
@@ -26,4 +32,9 @@ __all__ = [
     "CollabRequest",
     "AutoReply",
     "PostTemplate",
+    "AutomationScenario",
+    "AutomationStep",
+    "AutomationSession",
+    "ChatHistory",
+    "DesignHistory",
 ]
