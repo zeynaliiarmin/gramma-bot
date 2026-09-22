@@ -39,6 +39,12 @@ def _make_client(monkeypatch, *, secret: str = "", cron_secret: str = ""):
     if not settings.miniapp_public_url:
         settings.miniapp_public_url = "https://miniapp-five-inky.vercel.app"
 
+    # Each test gets a clean per-process dedupe LRU (production keeps it warm
+    # per Lambda container; tests must not leak update_ids into each other).
+    import app.core.shared_state as shared
+
+    shared.seen_update_ids._lru.clear()
+
     import api.index as apimod
     from starlette.testclient import TestClient
 
@@ -119,6 +125,24 @@ def test_webhook_updates_counter(monkeypatch, tmp_path):
     before = shared.telegram_updates_seen
     client.post("/api/telegram/webhook", json=_start_update(495432021))
     assert shared.telegram_updates_seen == before + 1
+
+
+def test_webhook_dedupes_repeated_update_id(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/t.db")
+    client = _make_client(monkeypatch)
+    import app.core.shared_state as shared
+
+    before = shared.telegram_updates_seen
+    body = {"update_id": 999001, "message": {
+        "message_id": 99, "from": {"id": 495432021, "is_bot": False, "first_name": "A"},
+        "chat": {"id": 495432021, "type": "private", "first_name": "A"},
+        "date": 1720000000, "text": "/start"}}
+    r1 = client.post("/api/telegram/webhook", json=body)
+    r2 = client.post("/api/telegram/webhook", json=body)
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert r2.json().get("duplicate") is True
+    assert shared.telegram_updates_seen == before + 1  # counted once
 
 
 def test_cron_route_requires_secret(monkeypatch, tmp_path):

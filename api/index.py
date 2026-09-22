@@ -94,6 +94,13 @@ async def telegram_webhook(request: Request):
 
     update = _parse_update(payload)
     update_id = int(payload.get("update_id") or 0) if payload else None
+
+    # Per-process dedupe: Telegram retries the same update_id while we are
+    # still answering; skip genuine duplicates (best-effort, bounded LRU).
+    if update_id and update_id in shared.seen_update_ids:
+        return Response(status_code=200, content='{"ok":true,"duplicate":true}')
+    if update_id:
+        shared.seen_update_ids.add(update_id)
     _note_seen(update_id)
 
     if update is not None:
@@ -214,13 +221,20 @@ def _routing_key(update) -> int:
     return 0
 
 
-# ── Cron trigger (pg_cron or Vercel Cron → publish due posts) ─
+# ── Cron trigger (pg_cron or Vercel Cron → background jobs) ──
 @_tg_router.api_route("/api/cron/{job}", methods=["GET", "POST"], include_in_schema=False)
 async def cron_trigger(job: str, request: Request):
-    """Endpoint pg_cron (or Vercel Cron) calls to publish due posts.
+    """Endpoint pg_cron (or Vercel Cron) calls for scheduled jobs:
+
+      * publish                   — publish due posts (every 1 min)
+      * process-comment-queue     — drain the comment-reply queue (every 5 min)
+      * check-instagram-health    — probe connected pages (every 10 min)
+      * reset-daily-counters      — no-op (reset is implicit via Tehran date
+                                    keying); returns today's counters (00:00)
+      * daily-report              — 23:59 Tehran admin report + alerts
 
     Guarded by the shared CRON_SECRET (sent as ``X-Cron-Secret``) so a random
-    visitor cannot force publishes. Empty CRON_SECRET keeps it open for local
+    visitor cannot trigger jobs. Empty CRON_SECRET keeps it open for local
     testing only.
     """
     cron_secret = get_settings().cron_secret
@@ -229,17 +243,65 @@ async def cron_trigger(job: str, request: Request):
         if not hmac.compare_digest(provided.encode(), cron_secret.encode()):
             return Response(status_code=403, content="forbidden")
 
-    if job != "publish":
-        return Response(status_code=404, content="unknown job")
+    if job == "publish":
+        from app.services.publisher import publish_due_posts
 
-    from app.services.publisher import publish_due_posts
+        try:
+            summary = await publish_due_posts()
+            return {"ok": True, **summary}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("cron publish failed")
+            return Response(status_code=500, content='{"ok":false}')
 
-    try:
-        summary = await publish_due_posts()
-        return {"ok": True, **summary}
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("cron publish failed")
-        return Response(status_code=500, content='{"ok":false}')
+    if job == "process-comment-queue":
+        from app.services.reply_queue import run_queue_pass
+
+        try:
+            totals = await run_queue_pass()
+            return {"ok": True, **totals}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("queue pass failed")
+            return Response(status_code=500, content='{"ok":false,"error":"%s"}' % str(exc)[:200])
+
+    if job == "check-instagram-health":
+        from app.services.monitoring import check_all_accounts_health
+
+        try:
+            reports = await check_all_accounts_health()
+            return {"ok": True, "accounts_checked": len(reports),
+                    "unhealthy": [r for r in reports if not r["ok"]]}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("health check failed")
+            return Response(status_code=500, content='{"ok":false}')
+
+    if job == "reset-daily-counters":
+        # Reset is implicit: counters are keyed by Tehran date, so a new day
+        # simply creates fresh rows. This endpoint reports the state (and is
+        # kept as the explicit 00:00 Tehran boundary tick).
+        from app.core.database import SessionLocal
+        from app.services.monitoring import _today_stats
+
+        try:
+            async with SessionLocal() as s:
+                stats = await _today_stats(s)
+            return {"ok": True, "date": stats["date"],
+                    "replies_sent": stats["replies_sent"],
+                    "queued": stats["queued"]}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("reset-daily-counters failed")
+            return Response(status_code=500, content='{"ok":false}')
+
+    if job == "daily-report":
+        from app.services.monitoring import build_and_send_daily_report
+
+        try:
+            report = await build_and_send_daily_report()
+            return {"ok": report.get("ok", False), **report}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("daily report failed")
+            return Response(status_code=500, content='{"ok":false}')
+
+    return Response(status_code=404, content="unknown job")
 
 
 # ── Mount the Instagram webhook/OAuth router too ─────────────

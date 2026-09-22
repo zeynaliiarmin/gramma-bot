@@ -91,7 +91,7 @@ async def _consume_and_record_event(payload: dict) -> None:
                         )
                     ).scalars().first()
 
-                # Auto-reply: incoming DM (field=messages)
+                # Auto-reply: incoming DM (field=messages) — NEVER limited.
                 dm_text = None
                 thread_id = None
                 sender = None
@@ -101,6 +101,52 @@ async def _consume_and_record_event(payload: dict) -> None:
                         sender = value["sender"].get("id")
                     dm_text = (m.get("text") or (m.get("attachments") and "📎") or "")
                     thread_id = value.get("sender", {}).get("id") or value.get("thread_id")
+
+                # Auto-reply: incoming comment (field=comments) — capped by the
+                # daily/hourly budget; overflow is queued FIFO instead of sent.
+                if acc and field == "comments":
+                    comment_id = str(value.get("id") or value.get("comment_id") or "")
+                    comment_text = value.get("text") or ""
+                    commenter = (value.get("from") or {})
+                    commenter_id = commenter.get("id") if isinstance(commenter, dict) else None
+                    if comment_id and comment_text:
+                        from app.services.reply_engine import route_comment_auto_reply
+
+                        decision = await route_comment_auto_reply(
+                            session,
+                            acc,
+                            comment_id=comment_id,
+                            comment_text=comment_text,
+                            commenter_id=commenter_id,
+                        )
+                        d = decision.as_dict()
+                        text += (
+                            f" comment_action={d['action']}"
+                            + (f" queue_id={d['queue_id']}" if d.get("queue_id") else "")
+                        )
+                        # Keep a Comment record for the community view.
+                        from app.models import Comment
+
+                        exists = (
+                            await session.execute(
+                                select(Comment).where(Comment.ig_comment_id == comment_id)
+                            )
+                        ).scalars().first()
+                        if exists is None:
+                            session.add(
+                                Comment(
+                                    account_id=acc.id,
+                                    ig_comment_id=comment_id,
+                                    ig_media_id=str(
+                                        (value.get("media") or {}).get("id", "")
+                                    ),
+                                    username=commenter.get("username", "")
+                                    if isinstance(commenter, dict)
+                                    else "",
+                                    text=comment_text,
+                                    replied=d["action"] in ("replied",),
+                                )
+                            )
 
                 if acc and dm_text:
                     from app.services.analytics_history import record_chat

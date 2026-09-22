@@ -7,6 +7,7 @@ through the same async interface (`asyncpg` vs `aiosqlite`).
 
 from __future__ import annotations
 
+import os
 from typing import AsyncIterator
 
 from sqlalchemy import BigInteger, Integer, text
@@ -36,12 +37,27 @@ else:
     # Serverless / pooled Postgres (Supabase): recycle connections before
     # the pgbouncer/transact pooler idle timeouts, so warm Lambda instances
     # never reuse a stale connection after a cold start.
-    _engine_kwargs.setdefault("pool_recycle", 150)
-    _engine_kwargs.setdefault("pool_size", 5)
-    _engine_kwargs.setdefault("max_overflow", 10)
+    _is_pooler = "pooler" in settings.database_url or ":6543" in settings.database_url
+    try:
+        _pool_size = int(os.environ.get("POOL_SIZE", "5"))
+    except (ValueError, TypeError):
+        _pool_size = 5
+    try:
+        _max_overflow = int(os.environ.get("MAX_OVERFLOW", "5" if _is_pooler else "10"))
+    except (ValueError, TypeError):
+        _max_overflow = 5 if _is_pooler else 10
+
+    # The Supabase *transaction* pooler (port 6543) multiplexes many server
+    # leases over a fixed pool: keep per-instance pools small so bursts from
+    # several warm Lambdas never exhaust the server-side pool.
+    _engine_kwargs["pool_recycle"] = 150
+    _engine_kwargs["pool_size"] = _pool_size
+    _engine_kwargs["max_overflow"] = _max_overflow
+    _engine_kwargs["pool_timeout"] = 10
+
     # Supabase transaction pooler (port 6543) does NOT support prepared
     # statements; asyncpg must not cache them.
-    if "pooler" in settings.database_url or ":6543" in settings.database_url:
+    if _is_pooler:
         _engine_kwargs["connect_args"] = {
             "statement_cache_size": 0,
             "prepared_statement_cache_size": 0,

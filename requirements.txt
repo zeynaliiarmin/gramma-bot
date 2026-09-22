@@ -42,17 +42,11 @@ fastapi>=0.110
 uvicorn>=0.29
 python-multipart>=0.0.9
 
-# ── Search / text processing (semantic search tokenizer) ─────
-beautifulsoup4>=4.12        # HTML stripping of search snippets
-lxml>=5.1                   # fast tokenizer backend (optional)
-
-# ── Date/time utilities (Persian calendar display) ───────────
-babel>=2.14
+# ── Date/time utilities ──────────────────────────────────────
+# (Jalali/Shamsi conversions are implemented in pure Python in
+#  app/utils/jalali.py — no babel/jdatetime dependency needed.)
+tzdata>=2024.1
 
 # ── Dev / test ───────────────────────────────────────────────
 pytest>=8.0
 pytest-asyncio>=0.23
-
-
-# ── Jalali (Shamsi) calendar conversions ─────────────────────
-jdatetime>=5.0

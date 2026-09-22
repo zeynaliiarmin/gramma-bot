@@ -384,8 +384,147 @@ async def api_autoreply_add(
         rule = await add_rule(
             session, account_id, (body or {}).get("keywords", ""), (body or {}).get("reply", "")
         )
+        if (body or {}).get("dm_followup"):
+            rule.dm_followup = str(body.get("dm_followup", ""))
         await session.commit()
         return {"ok": True, "id": rule.id}
+
+
+# ── Anti-Block: daily usage, queue, safety alerts ────────────
+@app.get("/api/reply-usage")
+async def api_reply_usage(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
+    """Today's comment-reply usage + limits + queue sizes for the user's pages."""
+    from app.services import limits
+    from app.services.reply_limits import (
+        CommentReplyQueue,
+        DailyReplyCounter,
+        get_counter,
+        tehran_date,
+    )
+
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, ident.user_id)
+        ids = [a.id for a in accounts]
+        per_account = []
+        totals = {"replies_today": 0, "queued": 0, "alerts": 0, "daily_limit_total": 0}
+        if ids:
+            today = tehran_date()
+            counters = list((await session.execute(
+                select(DailyReplyCounter).where(
+                    DailyReplyCounter.account_id.in_(ids),
+                    DailyReplyCounter.date == today,
+                )
+            )).scalars())
+            by_account = {c.account_id: c for c in counters}
+            queued = list((await session.execute(
+                select(CommentReplyQueue).where(
+                    CommentReplyQueue.account_id.in_(ids),
+                    CommentReplyQueue.status.in_(["pending", "processing"]),
+                )
+            )).scalars())
+            pending_by_account: dict[int, int] = {}
+            for q in queued:
+                pending_by_account[q.account_id] = pending_by_account.get(q.account_id, 0) + 1
+            for a in accounts:
+                cap = limits.reply_limit_for_account(a.created_at)
+                counter = by_account.get(a.id)
+                used = counter.replies_count if counter else 0
+                per_account.append({
+                    "account_id": a.id,
+                    "username": a.username,
+                    "name": a.name,
+                    "replies_today": used,
+                    "daily_limit": cap,
+                    "remaining": max(0, cap - used),
+                    "hourly_count": counter.hourly_count if counter else 0,
+                    "hourly_limit": limits.HOURLY_REPLY_LIMIT,
+                    "rate_profile": counter.rate_profile if counter else "—",
+                    "queued": pending_by_account.get(a.id, 0),
+                })
+                totals["replies_today"] += used
+                totals["daily_limit_total"] += cap
+                totals["queued"] += pending_by_account.get(a.id, 0)
+        from app.services.reply_limits import SafetyAlert
+
+        alerts = list((await session.execute(
+            select(SafetyAlert).where(
+                SafetyAlert.account_id.in_(ids),
+                SafetyAlert.resolved.is_(False),
+            ).order_by(SafetyAlert.id.desc()).limit(20)
+        )).scalars()) if ids else []
+        totals["alerts"] = len(alerts)
+        return {
+            "date": tehran_date(),
+            "daily_limit_per_account": limits.DAILY_REPLY_LIMIT,
+            "hourly_limit": limits.HOURLY_REPLY_LIMIT,
+            "schedules": per_account,
+            "totals": totals,
+            "alerts": [
+                {
+                    "id": x.id,
+                    "account_id": x.account_id,
+                    "alert_type": x.alert_type,
+                    "message": x.message,
+                    "created_at": x.created_at.isoformat() if x.created_at else None,
+                }
+                for x in alerts
+            ],
+        }
+
+
+@app.get("/api/reply-queue")
+async def api_reply_queue(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
+    """The pending comment-reply queue for the user's pages (FIFO order)."""
+    from app.services.reply_limits import CommentReplyQueue
+
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, ident.user_id)
+        ids = [a.id for a in accounts]
+        if not ids:
+            return {"items": []}
+        items = list((await session.execute(
+            select(CommentReplyQueue).where(
+                CommentReplyQueue.account_id.in_(ids),
+                CommentReplyQueue.status.in_(["pending", "processing", "failed"]),
+            ).order_by(CommentReplyQueue.id.asc()).limit(200)
+        )).scalars())
+        return {
+            "items": [
+                {
+                    "id": q.id,
+                    "account_id": q.account_id,
+                    "comment_text": (q.comment_text or "")[:200],
+                    "has_dm_followup": q.dm_followup_required,
+                    "status": q.status,
+                    "retry_count": q.retry_count,
+                    "error_message": (q.error_message or "")[:200],
+                    "created_at": q.created_at.isoformat() if q.created_at else None,
+                }
+                for q in items
+            ]
+        }
+
+
+@app.post("/api/alerts/resolve")
+async def api_alert_resolve(
+    body: dict,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    """Mark a safety alert resolved (owner's account only)."""
+    from app.services.reply_limits import SafetyAlert
+
+    alert_id = (body or {}).get("alert_id")
+    if not alert_id:
+        raise HTTPError(400, "missing_alert_id")
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, ident.user_id)
+        ids = [a.id for a in accounts]
+        alert = await session.get(SafetyAlert, int(alert_id))
+        if alert is None or alert.account_id not in ids:
+            raise HTTPError(404, "not_found_or_not_yours")
+        alert.resolved = True
+        await session.commit()
+        return {"ok": True, "resolved": True}
 
 
 # ── Automation scenarios (multi-step auto-reply) ─────────────

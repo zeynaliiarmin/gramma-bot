@@ -8,6 +8,7 @@ import Calendar from './components/Calendar.jsx'
 import Collab from './components/Collab.jsx'
 import Automation from './components/Automation.jsx'
 import Settings from './components/Settings.jsx'
+import Safety from './components/Safety.jsx'
 
 const TABS = [
   { id: 'dashboard', label: 'داشبورد', icon: '📊' },
@@ -15,6 +16,7 @@ const TABS = [
   { id: 'calendar', label: 'تقویم', icon: '📅' },
   { id: 'collab', label: 'کلبریشن', icon: '🤝' },
   { id: 'automation', label: 'اتوماسیون', icon: '🤖' },
+  { id: 'safety', label: 'امنیت', icon: '🛡' },
 ]
 
 export default function App() {
@@ -124,6 +126,7 @@ export default function App() {
       {tab === 'calendar' && <Calendar />}
       {tab === 'collab' && <Collab />}
       {tab === 'automation' && <Automation />}
+      {tab === 'safety' && <Safety />}
       {tab === 'settings' && <Settings />}
 
       <nav className="bottom-nav">

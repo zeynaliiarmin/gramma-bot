@@ -44,6 +44,24 @@ settings = get_settings()
 router = Router(name="account")
 
 
+# ── Callback UX helper ───────────────────────────────────────
+async def _ack(callback: CallbackQuery, text: str = "") -> None:
+    """Answer the callback query *immediately* so Telegram never shows a
+    stuck/loading button; heavy DB/network work happens after the ack and
+    updates the message content instead."""
+    try:
+        await callback.answer(text or None)
+    except Exception:  # noqa: BLE001  (already answered / request expired)
+        pass
+
+def _error_edit(callback: CallbackQuery, text: str):
+    """Show a precise Persian error in the message after an ack."""
+    try:
+        return callback.message.edit_text(text)
+    except Exception:  # noqa: BLE001
+        return callback.message.answer(text)
+
+
 def _welcome_text(name: str, page_count: int) -> str:
     base = (
         f"👋 سلام <b>{name}</b>!\n\n"
@@ -130,14 +148,17 @@ async def cmd_connect(message: Message, state: FSMContext):
 @router.callback_query(F.data == "connect:start")
 async def cb_connect_start(callback: CallbackQuery, state: FSMContext):
     await state.clear()
+    # Ack FIRST, so the button never appears stuck while we hit the DB.
+    await _ack(callback)
     await _start_connect(callback.message)
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("connect:page:"))
 async def cb_connect_page(callback: CallbackQuery):
     """Re-issue the OAuth link for an already-created (pending) page."""
     account_id = int(callback.data.split(":")[2])
+    # Ack FIRST — DB + OAuth URL building happens afterwards.
+    await _ack(callback)
     async with SessionLocal() as session:
         user = await get_or_create_user(
             session,
@@ -148,11 +169,13 @@ async def cb_connect_page(callback: CallbackQuery):
         )
         acc = await session.get(InstagramAccount, account_id)
         if acc is None or acc.owner_id != user.id:
-            await callback.message.edit_text(tr(user.locale, "account_not_found"))
-            await callback.answer()
+            await _error_edit(
+                callback,
+                "❌ این پیج پیدا نشد یا متعلق به شما نیست.\n"
+                "لطفاً از طریق /connect دوباره تلاش کنید.",
+            )
             return
         await _build_oauth_message(session, acc, callback.message, user)
-        await callback.answer()
 
 
 async def _start_connect(message: Message):
@@ -217,10 +240,40 @@ async def _start_connect(message: Message):
         await _build_oauth_message(session, acc, message, user)
 
 
+def _oauth_preflight() -> str | None:
+    """Return a precise Persian error for the first mis-configuration, or None."""
+    if not settings.meta_app_id:
+        return (
+            "شناسه اپ متا (META_APP_ID) در سرور تنظیم نشده است. "
+            "تا زمانی که ادمین این مقدار را در Vercel ست نکند، اتصال واقعی انجام نمی‌شود."
+        )
+    if not settings.meta_app_secret:
+        return (
+            "کلید مخفی اپ متا (META_APP_SECRET) در سرور تنظیم نشده است. "
+            "بدون آن، تبادل کد OAuth امکان‌پذیر نیست."
+        )
+    if not settings.webhook_base_url:
+        return (
+            "آدرس بازگشت (WEBHOOK_BASE_URL) در سرور تنظیم نشده است. "
+            "متا باید بداند کد تأیید را به کدام آدرس برگرداند."
+        )
+    return None
+
+
 async def _build_oauth_message(session, acc: InstagramAccount, message: Message, user):
     if settings.is_simulation or not settings.meta_app_id:
         # Dev/demo: instantly link a simulated account (unique name per page).
         await _simulate_connect(session, acc, user, message)
+        return
+
+    # Production: fail loudly (precise Persian message) instead of a stuck button.
+    problem = _oauth_preflight()
+    if problem:
+        await message.answer(
+            "⚠️ <b>اتصال اینستاگرام در دسترس نیست</b>\n\n"
+            f"• {problem}\n\n"
+            "این خطا مربوط به تنظیمات سرور است، نه پیج شما."
+        )
         return
 
     redirect_uri = f"{settings.webhook_base_url}{settings.webhook_path_prefix}/callback"
@@ -285,11 +338,16 @@ from app.core.security.crypto import get_cipher  # noqa: E402  (used above)
 @router.callback_query(F.data.startswith("connect:done:"))
 async def cb_connect_done(callback: CallbackQuery):
     account_id = int(callback.data.split(":")[2])
+    # Ack FIRST — the DB lookup happens after the spinner is dismissed.
+    await _ack(callback)
     async with SessionLocal() as session:
         acc = await session.get(InstagramAccount, account_id)
         if acc is None or acc.owner_id != callback.from_user.id:
-            await callback.message.edit_text("Page not found or not yours.")
-            await callback.answer()
+            await _error_edit(
+                callback,
+                "❌ این پیج پیدا نشد یا متعلق به شما نیست.\n"
+                "لطفاً از طریق /connect دوباره تلاش کنید.",
+            )
             return
         if acc.long_lived_token_enc and acc.status == "connected":
             await callback.message.edit_text(
@@ -298,9 +356,11 @@ async def cb_connect_done(callback: CallbackQuery):
         else:
             await callback.message.edit_text(
                 "⏳ هنوز تایید دریافت نشده.\n"
-                "بعد از تکمیل ورود در مرورگر، دوباره «انجام شد» را بزنید."
+                "✅ مسیر مهم است: دکمه «ورود با اینستاگرام» را در مرورگر باز کنید، "
+                "پیج Business/Creator را انتخاب و مجوزها را تأیید کنید، سپس دوباره "
+                "«انجام شد» را بزنید.\n\n"
+                "⚠️ اگر خطایی دیدید: مطمئن شوید حسابتان Tester اپ متا در حالت Development است."
             )
-        await callback.answer()
 
 
 # ── Mini-App entry ───────────────────────────────────────────

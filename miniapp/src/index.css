@@ -125,6 +125,13 @@ body {
 .btn:active { transform: scale(.96); }
 .btn.ghost { background: var(--brand-soft); color: var(--brand); }
 .btn.danger { background: var(--rose); }
+.btn.btn-sm { padding: 6px 12px; font-size: 12px; border-radius: 10px; }
+
+.banner { border-radius: 12px; padding: 10px 14px; font-size: 13px; font-weight: 700; margin-bottom: 12px; }
+.banner.ok { background: #e3f9ef; color: #0b9e6e; }
+
+.progress { height: 8px; background: var(--line); border-radius: 8px; overflow: hidden; }
+.progress-fill { height: 100%; background: linear-gradient(90deg, var(--brand), #0dc9bd); border-radius: 8px; transition: width .3s; }
 
 .switch { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px; }
 .switch .track { width: 38px; height: 22px; background: #d6dae6; border-radius: 20px; position: relative; transition: .2s; }

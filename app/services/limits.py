@@ -34,6 +34,88 @@ REASON_USER_LIMIT = "user_limit"
 REASON_USER_TOTAL_LIMIT = "user_total_limit"
 REASON_TOTAL_LIMIT = "total_limit"
 
+# ─────────────────────────────────────────────────────────────
+# Anti-Block + daily reply caps (single source of truth).
+#
+# Required by production hardening:
+#   * at most DAILY_REPLY_LIMIT comment replies per page per Tehran day;
+#   * at most HOURLY_REPLY_LIMIT comment replies per page per rolling hour;
+#   * human-like pauses between queued actions;
+#   * a random 5–15 min rest break every few hours;
+#   * rate profiles (slow/medium/fast) drawn per account per day;
+#   * warm-up ramp for pages younger than WARMUP_FULL_DAYS days;
+#   * smart backoff ladder after Meta errors (5m → 15m → 1h → 24h);
+#   * a daily admin report at 23:59 Tehran + an alert when the error
+#     rate exceeds ALERT_ERROR_RATE within a day.
+# ─────────────────────────────────────────────────────────────
+
+DAILY_REPLY_LIMIT = 1000          # پاسخ کامنت در روز (هر پیج)
+HOURLY_REPLY_LIMIT = 100          # سقف ساعتی پاسخ کامنت (علاوه بر سقف روزانه)
+REPLY_MIN_DELAY_S = 1.5           # حداقل مکث شبه‌انسانی بین عملیات
+REPLY_MAX_DELAY_S = 4.5           # حداکثر مکث شبه‌انسانی بین عملیات
+QUEUE_HUMAN_DELAY_MIN_S = 2.0     # مکث بین آیتم‌های صف (کف تصادفی)
+QUEUE_HUMAN_DELAY_MAX_S = 5.0     # مکث بین آیتم‌های صف (سقف تصادفی)
+
+# Per-account rate profile averages (randomised each Tehran day):
+RATE_PROFILE_SLOW_AVG_S = 5.0     # کند — حدود ۵ ثانیه
+RATE_PROFILE_MEDIUM_AVG_S = 3.0   # متوسط — حدود ۳ ثانیه
+RATE_PROFILE_FAST_AVG_S = 1.5     # سریع — حدود ۱.۵ ثانیه
+RATE_PROFILES = ("slow", "medium", "fast")
+
+REST_BREAK_MIN_S = 5 * 60         # استراحت تصادفی ۵ تا ۱۵ دقیقه
+REST_BREAK_MAX_S = 15 * 60
+REST_BREAK_EVERY_MIN_ACTIONS = 80  # هر ~۸۰ عملیات یک استراحت
+
+# Warm-up ramp for freshly connected pages (share of DAILY_REPLY_LIMIT):
+WARMUP_PHASE_1_DAYS = 3           # روز ۱..۳
+WARMUP_PHASE_2_DAYS = 7           # روز ۴..۱۰
+WARMUP_PHASE_1_RATIO = 0.10       # ۱۰٪ → ۱۰۰ در روز
+WARMUP_PHASE_2_RATIO = 0.50       # ۵۰٪ → ۵۰۰ در روز
+WARMUP_FULL_DAYS = 10             # پس از ۱۰ روز → ۱۰۰۰ کامل
+
+# Smart backoff ladder (seconds) after Instagram errors — 5m → 15m → 1h → 24h.
+BACKOFF_STEPS_S = (5 * 60, 15 * 60, 60 * 60, 24 * 60 * 60)
+
+# Detection of Instagram error payloads → stop replies + alert admin.
+BLOCK_ERROR_CODES = {
+    "190": "oauth_exception",      # توکن منقضی/نامعتبر
+    "4": "rate_limit",             # محدودیت نرخ (استفاده API)
+    "17": "rate_limit",            # محدودیت نرخ (کاربر)
+    "368": "temporarily_blocked",  # مسدودی موقت
+    "1200": "suspicious_activity", # فعالیت مشکوک
+}
+
+# Monitoring / reporting
+ALERT_ERROR_RATE = 0.05            # نرخ خطای > ۵٪ → هشدار فوری
+DAILY_REPORT_TEHRAN_HOUR = 23
+DAILY_REPORT_TEHRAN_MINUTE = 59
+QUEUE_PROCESS_INTERVAL_MIN = 5     # صف هر ۵ دقیقه
+HEALTH_CHECK_INTERVAL_MIN = 10     # سلامت هر ۱۰ دقیقه
+BUSINESS_HOURS_ACTIVE_START_H = 8  # توزیع پاسخ‌ها عمدتاً ۸ تا ۲۳
+BUSINESS_HOURS_ACTIVE_END_H = 23
+BUSINESS_HOURS_PEAK_START_H = 10   # تمرکز ۱۰ تا ۲۲
+BUSINESS_HOURS_PEAK_END_H = 22
+
+MIN_REPLY_VARIANTS = 5             # حداقل ۵ نسخه از پیش‌نوشته‌شده (تنوع پاسخ)
+
+
+def reply_limit_for_account(account_created_at, *, now_utc=None) -> int:
+    """Warm-up ramp: 100 (≤3d) → 500 (≤10d) → 1000 (>10d)."""
+
+    from datetime import datetime, timedelta, timezone
+
+    now = now_utc or datetime.now(timezone.utc)
+    if account_created_at is None:
+        return DAILY_REPLY_LIMIT
+    if account_created_at.tzinfo is None:
+        account_created_at = account_created_at.replace(tzinfo=timezone.utc)
+    age_days = (now - account_created_at) / timedelta(days=1)
+    if age_days <= WARMUP_PHASE_1_DAYS:
+        return int(DAILY_REPLY_LIMIT * WARMUP_PHASE_1_RATIO)
+    if age_days <= WARMUP_PHASE_1_DAYS + WARMUP_PHASE_2_DAYS:
+        return int(DAILY_REPLY_LIMIT * WARMUP_PHASE_2_RATIO)
+    return DAILY_REPLY_LIMIT
+
 _ACTIVE_ACCOUNT_FILTER = InstagramAccount.status != "disconnected"
 
 
