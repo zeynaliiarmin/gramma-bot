@@ -84,7 +84,7 @@ export default function Integrations() {
           <div style={{ fontSize: 12, color: 'var(--muted)' }}>
             {cbx.enabled ? (
               <>
-                پیج: <b>{cbx.username || '@zeynalikids'}</b> · Workspace: {cbx.workspace_id || '1170629'}<br />
+                پیج: <b>{cbx.username || '@zeynalikids'}</b> · Workspace: {cbx.workspace_id || '11706290428788736'}<br />
                 قابلیت: کامنت (1000/روز) · دایرکت (نامحدود) · استوری ریپلای · AI AvalAI<br />
                 آدرس: <a href="https://app.chatbotx.io" target="_blank" rel="noreferrer">app.chatbotx.io</a>
                 {cbx.error && <><br />⚠️ {cbx.error}</>}

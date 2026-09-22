@@ -4,24 +4,33 @@ This is the ONLY entrypoint the Vercel project `miniapp` needs for the whole
 backend. It reuses the existing FastAPI app unchanged (``app.webapp.main``)
 and mounts two extra routers on top:
 
-  * ``POST /api/telegram/webhook`` — Telegram Bot API webhook. Each update is
-    parsed to an aiogram :class:`Update` and run through a fresh Dispatcher
-    (the same routers + middlewares the long-polling runtime uses) via
-    ``feed_update``, then answered with HTTP 200 so Telegram stops retrying.
-  * ``GET/POST /webhook/instagram`` + ``/webhook/instagram/callback`` — the
-    existing Meta OAuth + webhook receiver (already FastAPI).
+  * ``POST /api/telegram/webhook`` — Telegram Bot API webhook.
+  * ``GET/POST /webhook/instagram`` + ``/webhook/instagram/callback`` — Meta.
+
+Performance (2026-09-22 rework — "ack-first, build-once"):
+  * The aiogram Dispatcher (+ all 12 routers + middlewares) is built ONCE at
+    module load and reused by every request. No more per-request deepcopy of
+    routers, no lazy imports inside the request path — this removes seconds
+    of overhead per button press on warm instances.
+  * Every ``callback_query`` is acknowledged IMMEDIATELY (``answer()``) in an
+    outer middleware BEFORE any handler work starts, so the Telegram client
+    stops showing the button spinner at once — true ack-first.
+  * ``CallbackQuery.answer`` is made idempotent-safe (a second/late answer
+    never raises), so existing handlers that call ``answer()`` again keep
+    working after the middleware already acked.
+  * Only the aiogram ``Bot`` object is created per request (cheap — the HTTP
+    session is lazy) and closed at the end of the request, which keeps us
+    safe against event-loop reuse issues on serverless.
 
 Security:
   * The Telegram route validates the optional ``X-Telegram-Bot-Api-Secret-Token``
-    header (constant-time) whenever ``TELEGRAM_WEBHOOK_SECRET`` is set. An
-    update's ``token`` field is never trusted and never chooses a bot.
+    header (constant-time) whenever ``TELEGRAM_WEBHOOK_SECRET`` is set.
   * Everything else (initData HMAC, session tickets, ownership scoping) is
-    already enforced inside ``app.webapp.main`` / ``app.webapp.auth``.
+    enforced inside ``app.webapp.main`` / ``app.webapp.auth``.
 """
 
 from __future__ import annotations
 
-import asyncio
 import hmac
 import logging
 import os
@@ -48,12 +57,7 @@ _tg_router = APIRouter(tags=["telegram"])
 
 
 def _authorized(request: Request) -> bool:
-    """Constant-time check of the optional webhook secret header.
-
-    Reads settings at call time (not import time) so tests/ops can flip the
-    env without restarting — and a mis-set secret is always enforced when
-    configured.
-    """
+    """Constant-time check of the optional webhook secret header."""
     secret = get_settings().telegram_webhook_secret
     if not secret:
         return True
@@ -70,6 +74,101 @@ def _note_seen(update_id: int | None) -> None:
             shared.telegram_last_update_id = update_id
     except Exception:  # noqa: BLE001
         pass
+
+
+# ── Build the bot machinery ONCE per instance (module load) ───
+# Handlers are imported eagerly so cold-start cost is paid once, and ONE
+# Dispatcher (routers + middlewares + FSM storage) is shared by all requests
+# served by this warm instance — no per-request rebuilds, no lazy imports.
+# Routers are deep-copied exactly once at import time (aiogram routers copy
+# cleanly) so the original module routers stay free for other dispatchers in
+# the same process (local polling, tests).
+import copy as _copy  # noqa: E402
+
+from aiogram import Bot, Dispatcher  # noqa: E402
+from aiogram.client.default import DefaultBotProperties  # noqa: E402
+from aiogram.enums import ParseMode  # noqa: E402
+from aiogram.fsm.storage.memory import MemoryStorage  # noqa: E402
+from aiogram.fsm.strategy import FSMStrategy  # noqa: E402
+from aiogram.types import CallbackQuery  # noqa: E402
+
+from app.bot.handlers import (  # noqa: E402
+    account, ai, calendar, collab, community, direct,
+    insights, navigation, publish, schedule, search, studio,
+)
+from app.bot.main import (  # noqa: E402
+    DatabaseMiddleware,
+    ErrorHandlerMiddleware,
+    _fallback_router,
+)
+
+
+def _detached_copy(router):
+    """Deep-copy a router and drop the copied parent attachment.
+
+    ``deepcopy`` carries ``_parent_router`` over; if the original router was
+    already attached to another dispatcher in this process (local polling or
+    tests), the copy would refuse to attach here. Only the copy is touched.
+    """
+    r = _copy.deepcopy(router)
+    r._parent_router = None  # noqa: SLF001 — aiogram internal, safe on a copy
+    return r
+
+
+def _build_webhook_dispatcher() -> Dispatcher:
+    dp = Dispatcher(storage=MemoryStorage(), fsm_strategy=FSMStrategy.USER_IN_CHAT)
+    dp["settings"] = settings
+    dp.callback_query.middleware(DatabaseMiddleware())
+    dp.message.middleware(DatabaseMiddleware())
+    dp.errors.middleware(ErrorHandlerMiddleware())
+    for module in (
+        account, ai, calendar, collab, community, direct,
+        insights, navigation, publish, schedule, search, studio,
+    ):
+        dp.include_router(_detached_copy(module.router))
+    # Catch-all LAST: answers any callback no handler claimed.
+    dp.include_router(_detached_copy(_fallback_router()))
+    return dp
+
+
+_DISPATCHER = _build_webhook_dispatcher()
+
+# ── Idempotent-safe CallbackQuery.answer (module-level, webhook mode) ──
+# After the ack-first middleware answers a query, handlers may call
+# ``callback.answer(...)`` again; Telegram then returns an error which aiogram
+# would raise. Swallow that specific failure so no handler ever breaks.
+_orig_answer = CallbackQuery.answer
+
+
+async def _safe_answer(self, *args, **kwargs):  # noqa: ANN001
+    try:
+        return await _orig_answer(self, *args, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("callback.answer ignored (already acked/expired): %s", exc)
+        return True
+
+
+CallbackQuery.answer = _safe_answer  # type: ignore[method-assign]
+
+
+class AckFirstMiddleware:
+    """Acknowledge every callback_query BEFORE the handler runs.
+
+    The Telegram client keeps the button spinner until ``answerCallbackQuery``
+    arrives. Answering instantly (empty toast) makes the bot feel immediate
+    even while DB/AI work continues in the handler.
+    """
+
+    async def __call__(self, handler, event, data):  # noqa: ANN001
+        if isinstance(event, CallbackQuery):
+            try:
+                await event.answer()
+            except Exception:  # noqa: BLE001
+                pass
+        return await handler(event, data)
+
+
+_DISPATCHER.callback_query.outer_middleware(AckFirstMiddleware())
 
 
 @_tg_router.post(settings.telegram_webhook_path)
@@ -132,62 +231,18 @@ def _parse_update(payload: dict):
 
 
 async def _dispatch(update) -> None:
-    """Feed one update to a fresh aiogram Dispatcher + Bot.
+    """Feed one update to the process-wide cached Dispatcher.
 
-    aiogram is designed around one long-lived event loop; on serverless the
-    safest pattern is to recreate the whole stack per request (cheap for the
-    small updates the bot handles). FSM context lives in a per-request
-    MemoryStorage — single-shot flows (menus, buttons, webapp, /start) are
-    stateless and fully reliable; multi-message dialogs re-prompt gracefully
-    in webhook mode.
+    A fresh light-weight ``Bot`` is created per request (no network I/O at
+    construction; the aiohttp session is created lazily on first API call and
+    closed in ``finally``) so we never leak sessions across event loops.
     """
-    from aiogram import Bot, Dispatcher
-    from aiogram.client.default import DefaultBotProperties
-    from aiogram.enums import ParseMode
-    from aiogram.fsm.strategy import FSMStrategy
-
     bot = Bot(
         token=settings.telegram_bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-
-    dp = Dispatcher(storage=None, fsm_strategy=FSMStrategy.CHAT)
-    dp["settings"] = settings
-
-    from app.bot.main import DatabaseMiddleware, ErrorHandlerMiddleware, _fallback_router
-
-    dp.message.middleware(DatabaseMiddleware())
-    dp.callback_query.middleware(DatabaseMiddleware())
-    dp.errors.middleware(ErrorHandlerMiddleware())
-
-    # ── Registry: fresh (deep-copied) routers per request ──────
-    # Module-level routers have a single `parent_router` slot, so re-using
-    # them across serverless invocations raises "Router is already attached".
-    # aiogram routers deep-copy cleanly (including their handler stacks), so
-    # every request gets its own copy — this is the whole trick that makes
-    # the long-polling router set safe for one-shot webhook dispatch.
-    import copy as _copy
-
-    from app.bot.handlers import (
-        account, ai, calendar, collab, community, direct,
-        insights, navigation, publish, schedule, search, studio,
-    )
-
-    for module in (
-        account, ai, calendar, collab, community, direct,
-        insights, navigation, publish, schedule, search, studio,
-    ):
-        try:
-            dp.include_router(_copy.deepcopy(module.router))
-        except Exception as exc:  # noqa: BLE001  (never break dispatch)
-            logger.exception("include_router failed for %s: %s", module.__name__, exc)
     try:
-        dp.include_router(_copy.deepcopy(_fallback_router()))
-    except Exception:  # noqa: BLE001
-        pass
-
-    try:
-        await dp.feed_update(bot, update, routing_key=_routing_key(update))
+        await _DISPATCHER.feed_update(bot, update)
     finally:
         try:
             session = getattr(bot, "session", None)
@@ -195,30 +250,6 @@ async def _dispatch(update) -> None:
                 await session.close()
         except Exception:  # noqa: BLE001
             pass
-
-
-def _routing_key(update) -> int:
-    """Stable routing key = chat id of the contained event (FSMStrategy.CHAT)."""
-    obj = (
-        update.message
-        or update.edited_message
-        or update.callback_query
-        or update.inline_query
-        or update.chat_member
-        or update.my_chat_member
-        or update.chat_join_request
-    )
-    chat = None
-    if obj is not None:
-        chat = getattr(obj, "chat", None)
-        if chat is None and update.callback_query is not None:
-            chat = getattr(update.callback_query.message, "chat", None)
-    if chat is not None:
-        try:
-            return int(chat.id)
-        except (TypeError, ValueError):
-            return 0
-    return 0
 
 
 # ── Cron trigger (pg_cron or Vercel Cron → background jobs) ──
@@ -229,13 +260,10 @@ async def cron_trigger(job: str, request: Request):
       * publish                   — publish due posts (every 1 min)
       * process-comment-queue     — drain the comment-reply queue (every 5 min)
       * check-instagram-health    — probe connected pages (every 10 min)
-      * reset-daily-counters      — no-op (reset is implicit via Tehran date
-                                    keying); returns today's counters (00:00)
+      * reset-daily-counters      — reports today's counters (00:00)
       * daily-report              — 23:59 Tehran admin report + alerts
 
-    Guarded by the shared CRON_SECRET (sent as ``X-Cron-Secret``) so a random
-    visitor cannot trigger jobs. Empty CRON_SECRET keeps it open for local
-    testing only.
+    Guarded by the shared CRON_SECRET (sent as ``X-Cron-Secret``).
     """
     cron_secret = get_settings().cron_secret
     if cron_secret:
@@ -249,7 +277,7 @@ async def cron_trigger(job: str, request: Request):
         try:
             summary = await publish_due_posts()
             return {"ok": True, **summary}
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             logger.exception("cron publish failed")
             return Response(status_code=500, content='{"ok":false}')
 
@@ -270,14 +298,13 @@ async def cron_trigger(job: str, request: Request):
             reports = await check_all_accounts_health()
             return {"ok": True, "accounts_checked": len(reports),
                     "unhealthy": [r for r in reports if not r["ok"]]}
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             logger.exception("health check failed")
             return Response(status_code=500, content='{"ok":false}')
 
     if job == "reset-daily-counters":
         # Reset is implicit: counters are keyed by Tehran date, so a new day
-        # simply creates fresh rows. This endpoint reports the state (and is
-        # kept as the explicit 00:00 Tehran boundary tick).
+        # simply creates fresh rows. This endpoint reports the state.
         from app.core.database import SessionLocal
         from app.services.monitoring import _today_stats
 
@@ -287,7 +314,7 @@ async def cron_trigger(job: str, request: Request):
             return {"ok": True, "date": stats["date"],
                     "replies_sent": stats["replies_sent"],
                     "queued": stats["queued"]}
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             logger.exception("reset-daily-counters failed")
             return Response(status_code=500, content='{"ok":false}')
 
@@ -297,7 +324,7 @@ async def cron_trigger(job: str, request: Request):
         try:
             report = await build_and_send_daily_report()
             return {"ok": report.get("ok", False), **report}
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             logger.exception("daily report failed")
             return Response(status_code=500, content='{"ok":false}')
 

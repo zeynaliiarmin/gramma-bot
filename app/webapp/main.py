@@ -212,8 +212,11 @@ async def api_dashboard(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
         accounts = await get_accounts_for_user(session, ident.user_id)
         cards = []
         series = {"labels": [], "reach": [], "followers": []}
+        has_real_data = False
         for a in accounts:
             snap = await get_dashboard_snapshot(a)
+            if snap.get("has_data"):
+                has_real_data = True
             cards.append(
                 {
                     "account_id": a.id,
@@ -223,10 +226,14 @@ async def api_dashboard(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
                     "media_count": snap.get("media_count"),
                     "reach_today": snap.get("reach_today"),
                     "trend": snap.get("trend"),
+                    "has_data": snap.get("has_data", False),
+                    "message": snap.get("message", ""),
+                    "status": a.status,
+                    "last_sync_at": a.last_sync_at.isoformat() if a.last_sync_at else None,
                 }
             )
-        # Demo-friendly 7-day series (real Graph API can backfill later).
-        import random
+        # 7-day series: real values only. Until a page is genuinely synced we
+        # return zeros + has_data=False — never fabricated numbers.
         from zoneinfo import ZoneInfo
 
         tz = ZoneInfo(settings.timezone)
@@ -235,9 +242,14 @@ async def api_dashboard(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
         for i in range(6, -1, -1):
             day = datetime.now(tz) - timedelta(days=i)
             series["labels"].append(jalali.weekday_fa(day))
-            series["reach"].append(random.randint(200, 1200))
-            series["followers"].append(random.randint(0, 60))
-        return {"cards": cards, "series": series}
+            series["reach"].append(0)
+            series["followers"].append(0)
+        return {
+            "cards": cards,
+            "series": series,
+            "has_data": has_real_data,
+            "message": "" if has_real_data else "بدون داده — هنوز سینک واقعی با اینستاگرام انجام نشده است.",
+        }
 
 
 @app.get("/api/calendar")

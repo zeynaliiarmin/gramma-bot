@@ -114,6 +114,19 @@ class OpenClawClient:
             )
             raise OpenClawError("OpenClaw is disabled (OPENCLAW_BASE_URL not set)")
 
+        # OpenClaw lives on the user's phone (127.0.0.1) — from the Vercel
+        # serverless runtime it is unreachable. Fail FAST (raise) instead of
+        # blocking the request for the full 30s timeout. Callers already
+        # catch OpenClawError and fall back to AvalAI/templates.
+        import os
+
+        if os.environ.get("VERCEL") == "1":
+            await record_openclaw_activity(
+                user_id, account_id, f"openclaw_{task}",
+                "skipped: unreachable on serverless runtime (VERCEL=1)", "info",
+            )
+            raise OpenClawError("OpenClaw در محیط سرورلس در دسترس نیست")
+
         payload = {
             "message": message,
             # Always attach the current Jalali date/time snapshot so OpenClaw

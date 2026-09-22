@@ -251,7 +251,7 @@ export default function Automation() {
           <div style={{ fontSize: 12, lineHeight: 1.8 }}>
             <div>فعال: {cbxStatus.enabled ? '✅ بله' : '❌ خیر'} · پیکربندی: {cbxStatus.configured ? '✅' : '❌'}</div>
             <div>متصل: {cbxStatus.connected ? `✅ ${cbxStatus.username || '@zeynalikids'}` : '❌ غیرمتصل'}</div>
-            <div>Workspace: {cbxStatus.workspace_id || '1170629'} · Base: {cbxStatus.base_url || 'https://app.chatbotx.io/api'}</div>
+            <div>Workspace: {cbxStatus.workspace_id || '11706290428788736'} · Base: {cbxStatus.base_url || 'https://app.chatbotx.io/api'}</div>
             {cbxStatus.error && <div style={{ color: 'var(--danger)' }}>⚠️ {cbxStatus.error}</div>}
             <div style={{ marginTop: 8, fontSize: 11, color: 'var(--muted)' }}>
               ⚠️ نکته: در پنل ChatbotX، AI Auto Reply و Flows داخلی را <b>خاموش</b> کنید تا دو بار پاسخ ندهد (ریسک بلاک).

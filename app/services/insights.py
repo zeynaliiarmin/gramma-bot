@@ -100,15 +100,32 @@ def format_health_report(report: HealthReport) -> str:
 
 
 async def get_dashboard_snapshot(account) -> dict:
-    """Light-weight numbers for the single-page dashboard."""
+    """Light-weight numbers for the single-page dashboard.
+
+    Honesty rule: NEVER fabricate numbers. If the page was never synced with
+    real data (``last_sync_at`` is null) we report ``has_data=False`` so the
+    UI shows «بدون داده» instead of simulated figures.
+    """
+    has_real_data = getattr(account, "last_sync_at", None) is not None
+    if not has_real_data:
+        return {
+            "has_data": False,
+            "followers": None,
+            "media_count": None,
+            "reach_today": None,
+            "trend": None,
+            "message": "بدون داده — پیج هنوز با اینستاگرام سینک واقعی نشده است.",
+        }
     svc = InstagramService()
     try:
         info = await svc.get_account_info(account)
     except Exception:
         info = {}
     return {
-        "followers": info.get("followers_count", "-"),
-        "media_count": info.get("media_count", "-"),
-        "reach_today": random.randint(50, 999) if account.instagram_user_id is None else "-",
-        "trend": random.choice(["+12%", "+4%", "-1%", "+23%"]),
+        "has_data": True,
+        "followers": info.get("followers_count"),
+        "media_count": info.get("media_count"),
+        "reach_today": info.get("reach_today"),
+        "trend": info.get("trend"),
+        "message": "",
     }

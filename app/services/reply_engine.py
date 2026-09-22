@@ -339,15 +339,19 @@ async def route_incoming_message(
 
     # 2. Try AI if enabled
     ai_enabled = False
-    # Check if AvalAI or OpenClaw is configured
-    if getattr(settings, "avalai_api_key", None) or getattr(settings, "openclaw_base_url", None):
+    # AvalAI is the only AI usable on the serverless webhook runtime
+    # (OpenClaw lives on the user's phone and is unreachable from Vercel).
+    if getattr(settings, "avalai_api_key", None):
         ai_enabled = True
 
     if ai_enabled and text:
         try:
             from app.services.ai import draft_reply
 
-            ai_reply = await draft_reply(text, locale="fa")
+            # Webhook path gets a hard 5s budget so an incoming Instagram
+            # message can never stall the function; local polling keeps 20s.
+            ai_timeout = 5.0 if getattr(settings, "run_mode", "webhook") == "webhook" else 20.0
+            ai_reply = await draft_reply(text, locale="fa", timeout=ai_timeout)
             if ai_reply:
                 return IncomingDecision(
                     account_id=account.id,

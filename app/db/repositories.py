@@ -33,13 +33,32 @@ async def get_or_create_user(
 
     user = await session.get(User, telegram_id)
     if user is not None:
+        # Self-heal the admin flag for ids listed in ADMIN_TELEGRAM_IDS
+        # (covers users created before the flag was wired up).
+        try:
+            from app.core.config import get_settings
+
+            if not user.is_admin and telegram_id in get_settings().admin_ids:
+                user.is_admin = True
+                await session.flush()
+        except Exception:  # noqa: BLE001
+            pass
         return user
+
+    # Admin flag: anyone listed in ADMIN_TELEGRAM_IDS is an admin.
+    try:
+        from app.core.config import get_settings
+
+        is_admin = telegram_id in get_settings().admin_ids
+    except Exception:  # noqa: BLE001
+        is_admin = False
 
     values = dict(
         id=telegram_id,
         telegram_username=username,
         full_name=full_name or (username or str(telegram_id)),
         locale=locale,
+        is_admin=is_admin,
     )
 
     # Portability: build the right upsert statement for the active dialect.

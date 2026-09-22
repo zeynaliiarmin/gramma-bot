@@ -181,8 +181,16 @@ async def classify_dm_async(text: str, locale: str | None = None) -> str:
     return rule
 
 
-async def draft_reply(incoming_text: str, locale: str | None = None) -> str | None:
-    """Draft an AI reply to an incoming DM (AvalAI). Returns None on failure."""
+async def draft_reply(
+    incoming_text: str,
+    locale: str | None = None,
+    timeout: float = 20.0,
+) -> str | None:
+    """Draft an AI reply to an incoming DM (AvalAI). Returns None on failure.
+
+    ``timeout`` bounds the LLM call — the serverless webhook path passes a
+    short 5s budget so an incoming message can never hang the function.
+    """
     if not settings.ai_api_key:
         return _default_reply(incoming_text, locale)
     try:
@@ -191,7 +199,7 @@ async def draft_reply(incoming_text: str, locale: str | None = None) -> str | No
         client = AsyncOpenAI(
             api_key=settings.ai_api_key,
             base_url=settings.ai_base_url or None,
-            timeout=20.0,
+            timeout=timeout,
         )
         lang_hint = "Persian (فارسی)" if (locale or "").startswith("fa") else "English"
         resp = await client.chat.completions.create(

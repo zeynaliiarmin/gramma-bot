@@ -17,6 +17,9 @@ export default function Dashboard() {
 
   const cards = data.cards || []
   const series = data.series || {}
+  // Honesty flag from the backend: false = no real Instagram sync yet, so we
+  // must show «بدون داده» instead of numbers.
+  const hasData = data.has_data === true
 
   const totals = cards.reduce(
     (acc, c) => ({
@@ -29,17 +32,22 @@ export default function Dashboard() {
 
   return (
     <>
+      {!hasData && (
+        <div className="card" style={{ borderInlineStart: '3px solid #f5b942' }}>
+          📭 <b>بدون داده</b> — {data.message || 'این پیج هنوز با اینستاگرام سینک واقعی نشده است؛ اعداد نمایش‌داده‌شده ساختگی نیستند.'}
+        </div>
+      )}
       <div className="side-panel-holder">
         <div className="stat">
-          <div className="num">{totals.followers.toLocaleString('en-US')}</div>
+          <div className="num">{hasData ? totals.followers.toLocaleString('en-US') : '—'}</div>
           <div className="lbl">👥 فالوور کل</div>
         </div>
         <div className="stat">
-          <div className="num">{totals.reach.toLocaleString('en-US')}</div>
+          <div className="num">{hasData ? totals.reach.toLocaleString('en-US') : '—'}</div>
           <div className="lbl">📈 دسترسی امروز</div>
         </div>
         <div className="stat">
-          <div className="num">{totals.posts.toLocaleString('en-US')}</div>
+          <div className="num">{hasData ? totals.posts.toLocaleString('en-US') : '—'}</div>
           <div className="lbl">🖼 پست‌ها</div>
         </div>
         <div className="stat">
@@ -67,7 +75,10 @@ export default function Dashboard() {
             <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 700 }}>@{c.username || '—'}</div>
               <div style={{ fontSize: 11, color: 'var(--muted)' }}>
-                {c.name} · {Number(c.followers || 0).toLocaleString('en-US')} فالوور
+                {c.name} ·{' '}
+                {c.has_data === false
+                  ? 'بدون داده'
+                  : `${Number(c.followers || 0).toLocaleString('en-US')} فالوور`}
               </div>
             </div>
             <span className={'badge ' + (c.status === 'connected' ? 'ok' : 'err')}>

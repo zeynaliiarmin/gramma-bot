@@ -232,10 +232,18 @@ async def _check_daily_limit(account: InstagramAccount) -> tuple[bool, int, int]
 
 
 async def _generate_ai_reply(text: str, account_id: Optional[int] = None, user_id: Optional[int] = None) -> Optional[str]:
-    """Generate AI reply via AvalAI / OpenClaw."""
+    """Generate AI reply via AvalAI (direct).
+
+    OpenClaw is only reachable in local polling mode (it lives on the user's
+    phone at 127.0.0.1); on the serverless webhook runtime it would hang for
+    30s, so we skip it entirely when RUN_MODE=webhook.
+    """
     try:
-        # Try OpenClaw first (central brain)
-        if getattr(settings, "openclaw_base_url", None):
+        # Try OpenClaw first ONLY when reachable (never on Vercel runtime)
+        import os as _os
+
+        _on_vercel = _os.environ.get("VERCEL") == "1"
+        if getattr(settings, "openclaw_base_url", None) and not _on_vercel:
             try:
                 from app.services.openclaw import suggest_dm_reply, suggest_comment_reply
 
@@ -252,7 +260,7 @@ async def _generate_ai_reply(text: str, account_id: Optional[int] = None, user_i
         # Fallback to direct AvalAI
         from app.services.ai import draft_reply
 
-        reply = await draft_reply(text, locale="fa")
+        reply = await draft_reply(text, locale="fa", timeout=5.0)
         return reply
     except Exception as exc:
         logger.warning("AI reply generation failed: %s", exc)
@@ -481,6 +489,19 @@ async def chatbotx_webhook(request: Request):
 
 
 @router.get("/api/chatbotx-webhook")
-async def chatbotx_webhook_get():
-    """GET for verification / health."""
+async def chatbotx_webhook_get(request: Request):
+    """GET for verification / health.
+
+    ``?test=1`` additionally writes a probe row into ``activity_logs`` so we
+    can prove (in the DB) that an external caller — e.g. ChatbotX — can reach
+    this endpoint at all.
+    """
+    probe = request.query_params.get("test") or ""
+    if probe:
+        await _log_activity(
+            None, None,
+            "chatbotx_probe",
+            f"GET probe test={probe} ua={(request.headers.get('user-agent') or '')[:80]}",
+            "info",
+        )
     return {"ok": True, "webhook": "chatbotx", "time": datetime.now(timezone.utc).isoformat()}

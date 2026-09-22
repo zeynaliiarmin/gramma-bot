@@ -412,7 +412,7 @@ async def cb_chatbotx_check(callback: CallbackQuery):
                 "توکن را در .env و Vercel Env بگذارید:\n"
                 "`CHATBOTX_WORKSPACE_TOKEN=YOUR_CHATBOTX_TOKEN_HERE`\n"
                 "`CHATBOTX_BASE_URL=https://app.chatbotx.io/api`\n"
-                "`CHATBOTX_WORKSPACE_ID=1170629`\n"
+                "`CHATBOTX_WORKSPACE_ID=11706290428788736`\n"
                 "`CHATBOTX_ENABLED=true`\n\n"
                 "سپس دوباره بررسی کنید. پیج @zeynalikids در پنل ChatbotX متصل است."
             )
@@ -438,7 +438,7 @@ async def cb_chatbotx_check(callback: CallbackQuery):
             await callback.message.edit_text(
                 f"✅ <b>ChatbotX متصل است!</b>\n\n"
                 f"📱 پیج: {username}\n"
-                f"🔗 Workspace: {settings.chatbotx_workspace_id or '1170629'}\n"
+                f"🔗 Workspace: {settings.chatbotx_workspace_id or '11706290428788736'}\n"
                 f"💬 کامنت/دایرکت/استوری: فعال\n"
                 f"🤖 AI: AvalAI DeepSeek متصل\n\n"
                 f"اکنون می‌توانید از تمام قابلیت‌های ربات استفاده کنید."
