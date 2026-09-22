@@ -28,6 +28,7 @@ from app.services.reply_limits import (
     QUEUE_DONE,
     QUEUE_FAILED,
     QUEUE_PENDING,
+    QUEUE_PROCESSING,
     SafetyAlert,
     get_counter,
     record_reply_error,
