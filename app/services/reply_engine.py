@@ -293,3 +293,136 @@ class RouteDecision:
             "queue_id": self.queue_id,
             "dm_sent": self.dm_sent,
         }
+
+
+# ── New: generic incoming message router for ChatbotX API Channel ──
+async def route_incoming_message(
+    session: AsyncSession,
+    account,
+    *,
+    message_text: str,
+    message_type: str = "dm",  # dm | comment | story_reply
+    contact_id: str | None = None,
+    conversation_id: str | None = None,
+    now_utc: datetime | None = None,
+) -> "IncomingDecision":
+    """Route an incoming message from ChatbotX through auto_replies + AI.
+
+    This is the brain for the new architecture:
+      Instagram -> ChatbotX API Channel -> Gramma webhook -> this function
+        -> check auto_replies -> if match, return reply
+        -> else if AI enabled, generate via AvalAI
+        -> else no reply
+
+    Returns IncomingDecision with reply_text, source, etc.
+    """
+    now = now_utc or datetime.now(timezone.utc)
+    text = (message_text or "").strip()
+
+    # 1. Try auto_replies rule
+    rule = await find_rule(session, account.id, text)
+    if rule:
+        rule.matches = (rule.matches or 0) + 1
+        # Don't commit here, caller will commit
+        return IncomingDecision(
+            account_id=account.id,
+            incoming_text=text,
+            reply_text=rule.reply,
+            dm_followup=rule.dm_followup or "",
+            auto_reply_id=rule.id,
+            source="rule",
+            matched=True,
+            message_type=message_type,
+            conversation_id=conversation_id,
+            contact_id=contact_id,
+        )
+
+    # 2. Try AI if enabled
+    ai_enabled = False
+    # Check if AvalAI or OpenClaw is configured
+    if getattr(settings, "avalai_api_key", None) or getattr(settings, "openclaw_base_url", None):
+        ai_enabled = True
+
+    if ai_enabled and text:
+        try:
+            from app.services.ai import draft_reply
+
+            ai_reply = await draft_reply(text, locale="fa")
+            if ai_reply:
+                return IncomingDecision(
+                    account_id=account.id,
+                    incoming_text=text,
+                    reply_text=ai_reply,
+                    dm_followup="",
+                    auto_reply_id=None,
+                    source="ai",
+                    matched=False,
+                    ai_used=True,
+                    message_type=message_type,
+                    conversation_id=conversation_id,
+                    contact_id=contact_id,
+                )
+        except Exception as exc:
+            logger.warning("AI generation failed in route_incoming_message: %s", exc)
+
+    # 3. No match
+    return IncomingDecision(
+        account_id=account.id,
+        incoming_text=text,
+        reply_text=None,
+        dm_followup="",
+        auto_reply_id=None,
+        source="none",
+        matched=False,
+        message_type=message_type,
+        conversation_id=conversation_id,
+        contact_id=contact_id,
+    )
+
+
+class IncomingDecision:
+    """Decision for a generic incoming message (DM/comment/story) via ChatbotX."""
+
+    def __init__(
+        self,
+        account_id: int,
+        incoming_text: str,
+        reply_text: str | None,
+        dm_followup: str,
+        auto_reply_id: int | None,
+        source: str,  # rule | ai | none
+        matched: bool = False,
+        ai_used: bool = False,
+        message_type: str = "dm",
+        conversation_id: str | None = None,
+        contact_id: str | None = None,
+    ):
+        self.account_id = account_id
+        self.incoming_text = incoming_text
+        self.reply_text = reply_text
+        self.dm_followup = dm_followup
+        self.auto_reply_id = auto_reply_id
+        self.source = source
+        self.matched = matched
+        self.ai_used = ai_used
+        self.message_type = message_type
+        self.conversation_id = conversation_id
+        self.contact_id = contact_id
+
+    @property
+    def should_reply(self) -> bool:
+        return bool(self.reply_text)
+
+    def as_dict(self) -> dict:
+        return {
+            "account_id": self.account_id,
+            "incoming_text": self.incoming_text,
+            "reply_text": self.reply_text,
+            "source": self.source,
+            "matched": self.matched,
+            "ai_used": self.ai_used,
+            "message_type": self.message_type,
+            "conversation_id": self.conversation_id,
+            "contact_id": self.contact_id,
+            "auto_reply_id": self.auto_reply_id,
+        }

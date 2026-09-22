@@ -326,44 +326,60 @@ async def chatbotx_webhook(request: Request):
                 logger.warning("queue insert failed: %s", exc)
             return {"ok": True, "queued": True, "reason": "daily_limit"}
 
-    # 1. Check auto_replies rules
+    # 1. Check auto_replies rules via reply_engine.route_incoming_message
     reply_text = None
     rule_id = None
+    ai_used = False
+    decision = None
     if account:
         try:
+            from app.services.reply_engine import route_incoming_message
+
             async with SessionLocal() as session:
-                rule = await find_rule(session, account.id, text)
-                if rule:
-                    reply_text = rule.reply
-                    rule_id = rule.id
-                    # Increment matches
-                    rule.matches = (rule.matches or 0) + 1
-                    await session.commit()
+                # Need to re-fetch account in this session for FK
+                acc_in_session = await session.get(InstagramAccount, account.id)
+                if acc_in_session:
+                    decision = await route_incoming_message(
+                        session,
+                        acc_in_session,
+                        message_text=text,
+                        message_type=msg_type,
+                        contact_id=contact_id,
+                        conversation_id=conv_id,
+                    )
+                    if decision.should_reply:
+                        reply_text = decision.reply_text
+                        rule_id = decision.auto_reply_id
+                        ai_used = decision.ai_used
+                        # Commit matches increment
+                        await session.commit()
+                    else:
+                        await session.rollback()
                     await _log_activity(
                         account_id, user_id,
-                        "chatbotx_rule_match",
-                        f"rule {rule_id} matched for text={text[:100]} -> reply={reply_text[:100]}",
+                        f"chatbotx_{decision.source}_match" if decision.matched or decision.ai_used else "chatbotx_no_match",
+                        f"type={msg_type} text={text[:100]} -> reply={reply_text[:100] if reply_text else 'none'} source={decision.source}",
                         "info",
                     )
         except Exception as exc:
-            logger.warning("rule matching failed: %s", exc)
-
-    # 2. If no rule, try AI
-    ai_used = False
-    if not reply_text:
-        # Check if AI is enabled (global or per account)
-        # For now, if AvalAI key is set, AI is considered enabled
-        if getattr(settings, "avalai_api_key", None) or getattr(settings, "openclaw_base_url", None):
-            ai_reply = await _generate_ai_reply(text, account_id=account_id, user_id=user_id)
-            if ai_reply:
-                reply_text = ai_reply
-                ai_used = True
-                await _log_activity(
-                    account_id, user_id,
-                    "chatbotx_ai_reply",
-                    f"AI generated for text={text[:100]} -> {reply_text[:100]}",
-                    "info",
-                )
+            logger.warning("route_incoming_message failed: %s", exc)
+            # Fallback to old direct find_rule logic
+            try:
+                async with SessionLocal() as session:
+                    rule = await find_rule(session, account.id, text)
+                    if rule:
+                        reply_text = rule.reply
+                        rule_id = rule.id
+                        rule.matches = (rule.matches or 0) + 1
+                        await session.commit()
+                        await _log_activity(
+                            account_id, user_id,
+                            "chatbotx_rule_match",
+                            f"rule {rule_id} matched for text={text[:100]} -> reply={reply_text[:100]}",
+                            "info",
+                        )
+            except Exception as exc2:
+                logger.warning("fallback rule matching failed: %s", exc2)
 
     # 3. If still no reply, optionally notify admin and store
     if not reply_text:
