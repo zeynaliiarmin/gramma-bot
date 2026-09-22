@@ -6,14 +6,14 @@
 
 ## ۱) دیپلوی مینی‌اپ روی Vercel
 
-طبق دستور، مینی‌اپ از پوشه `miniapp` دیپلوی شد. دو پروژه مرتبط وجود داشت و هر دو آپدیت شدند:
+طبق دستور، مینی‌اپ فقط روی **یک** پروژه `miniapp` دیپلوی شده است. (پروژه اضافی `gramma-bot` حذف شد.)
 
 | پروژه | آدرس زنده (Alias) | وضعیت |
 |---|---|---|
 | `miniapp` | **https://miniapp-five-inky.vercel.app** | ✅ دیپلوی شد — نسخه جدید |
-| `gramma-bot` | https://gramma-bot.vercel.app | ✅ دیپلوی شد — نسخه جدید |
 
 - کد بیلدشده جدید شامل: اسکریپت اجباری `telegram-web-app.js`، تقویم شمسی `jalali-moment`، جریان احراز هویت `initData` و ذخیره بلیط در `sessionStorage`.
+- **فقط یک پروژه Vercel برای مینی‌اپ باقی مانده است:** `miniapp` با دامنه `miniapp-five-inky.vercel.app`.
 - **تأیید زنده:** `https://miniapp-five-inky.vercel.app` اکنون asset جدید (`index-DVpdY3We.js`) را سرو می‌کند.
 - توکن اصلی Vercel که دادید scope محدودی داشت؛ از توکن پشتیبان برای دیپلوی استفاده شد (هر دو توکن به همان حساب `zeynaliarmin233` اشاره دارند).
 
@@ -31,8 +31,7 @@
 
 ## ۳) VITE_API_BASE
 
-- ✅ پروژه `gramma-bot` از قبل `VITE_API_BASE=""` (خالی) داشت.
-- ✅ روی پروژه `miniapp` (دامنه زنده) هم `VITE_API_BASE=""` (خالی) ست شد.
+- - ✅ روی پروژه `miniapp` (دامنه زنده) هم `VITE_API_BASE=""` (خالی) ست شد.
 
 > ⚠️ **نکته برای شما:** چون بک‌اند Docker هنوز دامنه عمومی ندارد، این متغیر خالی است. مینی‌اپ در Docker روی همان origin بک‌اند سرو می‌شود، اما روی Vercel این متغیر باید بعداً به دامنه عمومی بک‌اند (مثلاً `https://backend.example.com`) ست شود.
 
