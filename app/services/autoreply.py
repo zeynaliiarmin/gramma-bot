@@ -18,8 +18,7 @@ from sqlalchemy import BigInteger, Boolean, DateTime, String, Text, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.core.database import Base
-from app.models.core import BIGINT_PK
+from app.core.database import Base, BIGINT_PK
 
 
 class AutoReply(Base):

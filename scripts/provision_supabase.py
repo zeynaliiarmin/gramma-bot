@@ -33,6 +33,10 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "000:test")
 os.environ.setdefault("ENCRYPTION_KEY", "9f6Bd2S19LFy/SQ/9Om4559N1Lgi5upd2zZGwvITWOA=")
+# DDL compilation only imports the model registry — no live connection is
+# made. Force a local sqlite URL so importing app.core.database never tries
+# to open the (network-blocked from some sandboxes) Supabase connection.
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./_provision_compile.db"
 
 
 # ── RLS: every table is private by default (service_role bypasses RLS) ──
@@ -50,47 +54,47 @@ def _all_tables_sql() -> list[str]:
     ]
 
 
-def _cron_sql(interval_minutes: int = 1, secret: str = "") -> list[str]:
-    """Install pg_cron + the scheduled-publish trigger callback job."""
-    cron = secret or os.environ.get("CRON_SECRET", "")
+def _cron_sql(interval_minutes: int = 1, cron_secret: str = "") -> list[str]:
+    """Install pg_cron + the scheduled-publish + retention jobs.
+
+    pg_cron schedules use cron syntax; a 1-minute publish cadence is ``* * * * *``.
+    Defaults export sane pg_cron settings so the scheduler runs in the
+    `postgres` database.
+    """
+    secret = cron_secret or os.environ.get("CRON_SECRET", "")
     target = os.environ.get("CRON_TARGET_URL", "")
-    targets = (
-        f"'{target}'\n"
-        if target
-        else "'' -- TODO: set CRON_TARGET_URL (the Vercel /api/cron function URL)\n"
-    )
-    secret_header = (
-        f"\n    , '{cron}' || NULLIF(_secret,'')" if cron else "\n"
-    )
-    body = f"""$cron$
-DO $$
-BEGIN
-  PERFORM net.http_post(
-    url := {targets.rstrip()},
-    headers := jsonb_build_object(
-      'content-type','application/json','x-cron-secret',
-      COALESCE(NULLIF(current_setting('gramma.cron_secret', true),''), '{cron}')
-    ),
-    body := '{{"job":"publish_due_posts"}}'::jsonb,
-    timeout_milliseconds := 30000
-  );
-END
-$$;
+
+    url = f"'{target}'" if target else "NULL"
+
+    body_publish = f"""$cron$
+SELECT net.http_post(
+  url := {url},
+  headers := jsonb_build_object('content-type','application/json','x-cron-secret','{secret}'),
+  body := '{{"job":"publish_due_posts"}}'::jsonb,
+  timeout_milliseconds := 30000
+);
 $cron$"""
-    extension_check = (
-        "SELECT extname FROM pg_extension WHERE extname='pg_cron';"
-    )
+
+    # Data retention: drop activity_logs older than 90 days.
+    body_cleanup = """$cron$
+DELETE FROM public.activity_logs WHERE created_at < now() - interval '90 days';
+$cron$"""
+
+    min_expr = "* * * * *" if interval_minutes <= 1 else f"*/{interval_minutes} * * * *"
+
     install = [
+        "ALTER DATABASE postgres SET cron.use_background_workers = on;",
         "CREATE EXTENSION IF NOT EXISTS pg_cron;",
-        "CREATE EXTENSION IF NOT EXISTS pg_net;  -- for net.http_post",
     ]
-    job = [
+    jobs = [
         "SELECT cron.unschedule('gramma_publish_due') "
         "WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname='gramma_publish_due');",
-        f"SELECT cron.schedule('gramma_publish_due', "
-        f"'{interval_minutes} minutes', {body});",
+        f"SELECT cron.schedule('gramma_publish_due', '{min_expr}', {body_publish});",
+        "SELECT cron.unschedule('gramma_cleanup') "
+        "WHERE EXISTS (SELECT 1 FROM cron.job WHERE jobname='gramma_cleanup');",
+        f"SELECT cron.schedule('gramma_cleanup', '*/30 * * * *', {body_cleanup});",
     ]
-    return install + job
+    return install + jobs
 
 
 async def main() -> int:

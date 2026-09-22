@@ -37,7 +37,10 @@ backups/
 
 # ── Node (miniapp) ─────────────────────
 miniapp/node_modules/
-miniapp/dist/
+# miniapp/dist is a BUILT ARTIFACT for the Vercel SPA static build; it must be
+# uploaded on deploy (legacy builds). Re-include despite the global `dist/`.
+!miniapp/dist/
+!miniapp/dist/**
 
 # Node for the OpenClaw bridge plugin (keep its built dist/)
 openclaw/gramma-bridge/node_modules/

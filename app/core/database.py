@@ -39,6 +39,13 @@ else:
     _engine_kwargs.setdefault("pool_recycle", 150)
     _engine_kwargs.setdefault("pool_size", 5)
     _engine_kwargs.setdefault("max_overflow", 10)
+    # Supabase transaction pooler (port 6543) does NOT support prepared
+    # statements; asyncpg must not cache them.
+    if "pooler" in settings.database_url or ":6543" in settings.database_url:
+        _engine_kwargs["connect_args"] = {
+            "statement_cache_size": 0,
+            "prepared_statement_cache_size": 0,
+        }
 
 engine = create_async_engine(settings.database_url, **_engine_kwargs)
 
@@ -63,8 +70,13 @@ async def _warmup() -> None:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         _ENGINE_HAS_CONNECTED = True
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         _ENGINE_HAS_CONNECTED = False
+        import logging
+
+        logging.getLogger("gramma.vercel").error(
+            "db warmup failed: %s: %s", type(exc).__name__, exc
+        )
         raise
 
 

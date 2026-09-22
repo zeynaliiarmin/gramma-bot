@@ -283,17 +283,27 @@ async def ensure_storage_buckets(
     buckets: Iterable[str],
     *,
     project_ref: str | None = None,
-    token: str | None = None,
+    api_key: str | None = None,
 ) -> list[dict]:
-    """Create public Storage buckets (Supabase Storage API)."""
+    """Create public Storage buckets (Supabase Storage API).
+
+    Uses the Supabase service_role/anon key (``api_key``) for BOTH the
+    ``Authorization`` bearer and the ``apikey`` header — not the Management
+    PAT. Falls back to ``SUPABASE_SERVICE_ROLE_KEY`` then ``SUPABASE_ANON_KEY``.
+    """
     import httpx
 
     ref = project_ref or _project_ref()
-    token = token or _management_token()
+    key = api_key or os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get(
+        "SUPABASE_ANON_KEY", ""
+    )
+    if not key:
+        raise RuntimeError("no Supabase API key (set SUPABASE_SERVICE_ROLE_KEY)")
+
     base = f"https://{ref}.supabase.co/storage/v1/bucket"
     headers = {
-        "Authorization": f"Bearer {token}",
-        "apikey": token,
+        "Authorization": f"Bearer {key}",
+        "apikey": key,
         "Content-Type": "application/json",
     }
     results: list[dict] = []
@@ -302,7 +312,6 @@ async def ensure_storage_buckets(
             resp = await client.post(
                 base, headers=headers, json={"id": bucket, "name": bucket, "public": True}
             )
-            # 400 + "already exists" is fine.
             ok = resp.status_code in (200, 201) or "already exists" in resp.text.lower()
             results.append({"bucket": bucket, "status": resp.status_code, "ok": ok})
     return results

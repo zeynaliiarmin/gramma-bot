@@ -8,6 +8,7 @@ an S3-compatible bucket and use S3_PUBLIC_BASE as the public prefix.
 from __future__ import annotations
 
 import os
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -18,8 +19,16 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
-UPLOAD_DIR = Path("media_uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+# Serverless-safe upload dir: Vercel's FS is read-only except /tmp.
+if os.environ.get("VERCEL") or settings.run_mode == "webhook":
+    UPLOAD_DIR = Path("/tmp/media_uploads")
+else:
+    UPLOAD_DIR = Path("media_uploads")
+try:
+    UPLOAD_DIR.mkdir(exist_ok=True)
+except OSError:  # noqa: BLE001  (read-only FS etc.)
+    UPLOAD_DIR = Path(tempfile.gettempdir()) / "media_uploads"
+    UPLOAD_DIR.mkdir(exist_ok=True)
 
 
 async def save_downloaded_media(bot: Bot, message: Message, is_video: bool = False) -> str:

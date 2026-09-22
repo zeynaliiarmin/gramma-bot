@@ -1,5 +1,9 @@
 node_modules
-dist
+# dist is a BUILT ARTIFACT that must be uploaded on Vercel deploy (legacy
+# builds). Keep it un-ignored so `vercel deploy` can ship the SPA.
+!dist
+!dist/**
 *.log
 .DS_Store
 .vercel
+.env

@@ -20,8 +20,10 @@ tests/
 # ── Frontend build deps (never needed in the serverless bundle) ──
 miniapp/node_modules/
 
-# ── The SPA bundle is rebuilt at deploy time; keep its source out
-# ── of the Python function as well (Vercel serves miniapp/dist itself).
+# ── Keep the SPA source + its gitignored dist/ OUT of the Python function
+# ── bundle (Vercel serves miniapp/dist as static output). Source files that
+# ── exist in git are ignored here, so the Python bundle stays lean.
+miniapp/src/
 app/webapp/static/
 
 # ── Local-only tooling ───────────────────────────────────────

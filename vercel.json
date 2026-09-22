@@ -1,7 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
-  "buildCommand": "cd miniapp && npm install && npm run build",
+  "installCommand": "cd miniapp && npm install",
+  "buildCommand": "cd miniapp && npm run build",
   "builds": [
     {
       "src": "api/index.py",

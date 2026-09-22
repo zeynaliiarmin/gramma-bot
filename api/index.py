@@ -153,6 +153,14 @@ async def _dispatch(update) -> None:
     dp.callback_query.middleware(DatabaseMiddleware())
     dp.errors.middleware(ErrorHandlerMiddleware())
 
+    # ── Registry: fresh (deep-copied) routers per request ──────
+    # Module-level routers have a single `parent_router` slot, so re-using
+    # them across serverless invocations raises "Router is already attached".
+    # aiogram routers deep-copy cleanly (including their handler stacks), so
+    # every request gets its own copy — this is the whole trick that makes
+    # the long-polling router set safe for one-shot webhook dispatch.
+    import copy as _copy
+
     from app.bot.handlers import (
         account, ai, calendar, collab, community, direct,
         insights, navigation, publish, schedule, search, studio,
@@ -162,8 +170,14 @@ async def _dispatch(update) -> None:
         account, ai, calendar, collab, community, direct,
         insights, navigation, publish, schedule, search, studio,
     ):
-        dp.include_router(module.router)
-    dp.include_router(_fallback_router())
+        try:
+            dp.include_router(_copy.deepcopy(module.router))
+        except Exception as exc:  # noqa: BLE001  (never break dispatch)
+            logger.exception("include_router failed for %s: %s", module.__name__, exc)
+    try:
+        dp.include_router(_copy.deepcopy(_fallback_router()))
+    except Exception:  # noqa: BLE001
+        pass
 
     try:
         await dp.feed_update(bot, update, routing_key=_routing_key(update))
