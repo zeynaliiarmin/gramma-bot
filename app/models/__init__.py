@@ -10,7 +10,7 @@ from app.models.core import (  # noqa: F401
     Post,
     User,
 )
-from app.services.analytics_history import ChatHistory, DesignHistory  # noqa: F401
+from app.services.analytics_history import ChatHistory, DesignHistory, PostReminder  # noqa: F401
 from app.services.automation import (  # noqa: F401
     AutomationScenario,
     AutomationSession,
@@ -37,4 +37,5 @@ __all__ = [
     "AutomationSession",
     "ChatHistory",
     "DesignHistory",
+    "PostReminder",
 ]

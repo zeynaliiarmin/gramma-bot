@@ -1,0 +1,35 @@
+# ── Secrets & environment ───────────────────────────────────
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# ── Python / tooling ────────────────────────────────────────
+.venv/
+venv/
+**/__pycache__/
+*.py[cod]
+*.db
+*.sqlite3
+.git/
+.gitignore
+tests/
+
+# ── Frontend build deps (never needed in the serverless bundle) ──
+miniapp/node_modules/
+
+# ── The SPA bundle is rebuilt at deploy time; keep its source out
+# ── of the Python function as well (Vercel serves miniapp/dist itself).
+app/webapp/static/
+
+# ── Local-only tooling ───────────────────────────────────────
+openclaw/
+gramma/
+gramma-bridge/
+openclaw-e2e/
+openclaw-runtime/
+README.md
+Dockerfile
+docker-compose.yml

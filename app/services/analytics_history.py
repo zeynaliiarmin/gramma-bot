@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, DateTime, Index, String, Text
+from sqlalchemy import BigInteger, DateTime, Index, String, Text, UniqueConstraint
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -97,3 +97,28 @@ async def record_design(
     )
     session.add(row)
     return row
+
+
+class PostReminder(Base):
+    """A reminder spawned for a scheduled post (bot, Mini-App or pg_cron).
+
+    The scheduler sends `<post_reminder_minutes_before>` minutes before a
+    scheduled publish; this table records every fired reminder so it is never
+    delivered twice by two different workers (serverless + local fallback).
+    """
+
+    __tablename__ = "post_reminders"
+    __table_args__ = (
+        UniqueConstraint("post_id", name="uq_post_reminder_post"),
+        Index("ix_post_reminders_due", "remind_at", "sent_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True, autoincrement=True)
+    post_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    remind_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )

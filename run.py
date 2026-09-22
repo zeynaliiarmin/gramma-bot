@@ -56,13 +56,25 @@ async def _amain(args: argparse.Namespace) -> None:
             scheduler.start()
             logger.info("in-process scheduler started")
 
-    # 3) Bot (long polling) + optional API server
+    # 3) Bot + optional API server.
+    #    RUN_MODE=webhook  → production: Telegram delivers updates to the
+    #                         Vercel /api/telegram/webhook function; we do
+    #                         NOT poll (conflicting getUpdates would break it).
+    #    RUN_MODE=polling  → local/dev fallback: long-polling as before.
     from app.bot.main import get_bot, get_dispatcher
 
     bot = get_bot()
     dp = get_dispatcher()
 
-    coros = [dp.start_polling(bot, allowed_updates=ALLOWED_UPDATES)]
+    coros = []
+    if args.force_polling or settings.run_mode == "polling":
+        coros.append(dp.start_polling(bot, allowed_updates=ALLOWED_UPDATES))
+        logger.info("RUN_MODE=polling → long-polling active (local fallback)")
+    else:
+        logger.info(
+            "RUN_MODE=webhook → not polling; Telegram updates arrive via the "
+            "Vercel webhook endpoint."
+        )
 
     if not args.no_api:
         from app.webapp.server import serve
@@ -82,6 +94,7 @@ def main() -> None:
     parser.add_argument("--no-api", action="store_true", help="do not start the Mini-App API server")
     parser.add_argument("--no-scheduler", action="store_true", help="disable the in-process scheduler")
     parser.add_argument("--create-tables", action="store_true", help="only create DB tables and exit")
+    parser.add_argument("--force-polling", action="store_true", help="long-poll even when RUN_MODE=webhook")
     args = parser.parse_args()
 
     if args.create_tables:

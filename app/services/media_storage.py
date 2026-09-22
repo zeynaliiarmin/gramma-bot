@@ -62,3 +62,43 @@ async def _upload_to_s3(local_path: Path, ext: str) -> str:
     client.upload_file(str(local_path), settings.s3_bucket, key)
     base = settings.s3_public_base or f"https://{settings.s3_bucket}.s3.amazonaws.com"
     return f"{base.rstrip('/')}/{key}"
+
+
+async def upload_to_supabase_storage(local_path: Path, ext: str) -> str:
+    """Upload a local file to the Supabase Storage bucket (serverless media).
+
+    Requires ``SUPABASE_URL`` + ``SUPABASE_SERVICE_ROLE_KEY``. Returns the
+    public HTTPS URL. Prefer this on Vercel (no S3 credentials, no boto3).
+    """
+    import httpx
+
+    key = f"gramma/{uuid.uuid4().hex}.{ext}"
+    bucket = settings.supabase_storage_bucket
+    url = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/{bucket}/{key}"
+    headers = {
+        "Authorization": f"Bearer {settings.supabase_service_role_key}",
+        "apikey": settings.supabase_service_role_key,
+    }
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        with open(local_path, "rb") as fh:
+            resp = await client.post(url, headers=headers, content=fh.read())
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(f"storage upload failed ({resp.status_code}): {resp.text[:300]}")
+    return f"{settings.supabase_url.rstrip('/')}/storage/v1/object/public/{bucket}/{key}"
+
+
+async def save_downloaded_media_serverless(bot: Bot, message: Message, is_video: bool = False) -> str:
+    """Vercel-friendly media save: local /tmp download → Supabase Storage.
+
+    Falls back to the plain local path when Supabase is not configured.
+    """
+    local = await save_downloaded_media(bot, message, is_video=is_video)
+    if settings.supabase_url and settings.supabase_service_role_key:
+        ext = local.rsplit(".", 1)[-1] if "." in local else "bin"
+        public = await upload_to_supabase_storage(Path(local), ext)
+        try:
+            os.remove(local)
+        except OSError:
+            pass
+        return public
+    return local

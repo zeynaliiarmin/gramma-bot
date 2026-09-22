@@ -1,0 +1,53 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "buildCommand": "cd miniapp && npm install && npm run build",
+  "builds": [
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python"
+    },
+    {
+      "src": "miniapp/dist/**",
+      "use": "@vercel/static"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/telegram/webhook",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "/api/telegram/webhook/",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "/webhook/instagram/callback",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "/webhook/instagram",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "/api/cron/(.*)",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "/api/(.*)",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "/healthz",
+      "dest": "api/index.py"
+    },
+    {
+      "src": "/assets/(.*)",
+      "dest": "/miniapp/dist/assets/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/miniapp/dist/$1"
+    }
+  ]
+}

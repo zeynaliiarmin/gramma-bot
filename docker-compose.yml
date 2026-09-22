@@ -36,6 +36,9 @@ services:
       DATABASE_URL: postgresql+asyncpg://gramma:gramma@db:5432/gramma
       REDIS_URL: redis://redis:6379/0
       SCHEDULER_BACKEND: celery
+      RUN_MODE: polling
+      TELEGRAM_WEBHOOK_SECRET: ""
+      CRON_SECRET: ""
     ports:
       - "8000:8000"
     depends_on:

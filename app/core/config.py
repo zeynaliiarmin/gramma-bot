@@ -87,6 +87,21 @@ class Settings(BaseSettings):
     # Telegram WebApp button URL. Falls back to public_base_url.
     miniapp_public_url: str = ""
 
+    # ── Serverless (Vercel + Supabase) ─────────────────────────
+    # RUN_MODE: "webhook" → Telegram talks to the Vercel function;
+    #           "polling" → local dev (`python run.py`) keeps long-polling.
+    run_mode: Literal["webhook", "polling"] = "webhook"
+    # Shared secret Telegram sends in `X-Telegram-Bot-Api-Secret-Token`.
+    telegram_webhook_secret: str = ""
+    # Path the Vercel function serves the Telegram webhook at.
+    telegram_webhook_path: str = "/api/telegram/webhook"
+    # Shared secret for the pg_cron → Vercel  /api/cron/*  callbacks.
+    cron_secret: str = ""
+    # Supabase (primary serverless DB / media store).
+    supabase_url: str = ""                 # https://<project-ref>.supabase.co
+    supabase_service_role_key: str = ""    # service_role JWT (secret)
+    supabase_storage_bucket: str = "gramma-media"
+
     # ── Misc ──────────────────────────────────────────────────
     log_level: str = "INFO"
     data_retention_days: int = 90
@@ -127,6 +142,12 @@ class Settings(BaseSettings):
     def miniapp_url(self) -> str:
         """Public Mini-App origin (dedicated var first, gateway fallback)."""
         return (self.miniapp_public_url or self.public_base_url or "").rstrip("/")
+
+    @property
+    def telegram_webhook_url(self) -> str:
+        """Absolute webhook URL Telegram should deliver updates to."""
+        base = self.miniapp_url or self.public_base_url or ""
+        return f"{base}{self.telegram_webhook_path}".rstrip("/") if base else ""
 
     @property
     def is_simulation(self) -> bool:
