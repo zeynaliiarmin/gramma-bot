@@ -331,6 +331,68 @@ async def cron_trigger(job: str, request: Request):
     return Response(status_code=404, content="unknown job")
 
 
+# ── Diagnostics (guarded by CRON_SECRET — never public) ──────
+@_tg_router.get("/api/diag/db", include_in_schema=False)
+async def diag_db(request: Request):
+    """Live DB connectivity probe: SELECT 1 through the real engine.
+
+    Returns the exact exception text (URL masked) so connectivity problems
+    can be diagnosed without reading Vercel runtime logs.
+    """
+    cron_secret = get_settings().cron_secret
+    if cron_secret:
+        provided = request.headers.get("X-Cron-Secret", "")
+        if not hmac.compare_digest(provided.encode(), cron_secret.encode()):
+            return Response(status_code=403, content="forbidden")
+
+    import re
+
+    from sqlalchemy import text
+
+    from app.core.database import SessionLocal
+
+    url_txt = re.sub(r"://([^:@/]+):([^@/]+)@", "://\\1:****@", str(get_settings().database_url))
+    out = {"database_url_masked": url_txt}
+    try:
+        async with SessionLocal() as s:
+            val = (await s.execute(text("SELECT 1"))).scalar()
+        out["ok"] = True
+        out["select1"] = val
+    except Exception as exc:  # noqa: BLE001
+        out["ok"] = False
+        out["error_type"] = type(exc).__name__
+        out["error"] = re.sub(r"://([^:@/]+):([^@/]+)@", "://\\1:****@", str(exc))[:500]
+    return out
+
+
+@_tg_router.get("/api/diag/env", include_in_schema=False)
+async def diag_env(request: Request):
+    """Report which env vars are SET on the live function (names + lengths).
+
+    Never returns values — only presence and length, so misconfiguration can
+    be spotted without leaking secrets.
+    """
+    cron_secret = get_settings().cron_secret
+    if cron_secret:
+        provided = request.headers.get("X-Cron-Secret", "")
+        if not hmac.compare_digest(provided.encode(), cron_secret.encode()):
+            return Response(status_code=403, content="forbidden")
+
+    keys = [
+        "TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "ADMIN_TELEGRAM_IDS",
+        "MINIAPP_PUBLIC_URL", "DATABASE_URL", "SUPABASE_URL",
+        "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_ANON_KEY", "AVALAI_API_KEY",
+        "AVALAI_BASE_URL", "AVALAI_MODEL", "CHATBOTX_ENABLED", "CHATBOTX_BASE_URL",
+        "CHATBOTX_WORKSPACE_ID", "CHATBOTX_WORKSPACE_TOKEN",
+        "CHATBOTX_API_CHANNEL_TOKEN", "RUN_MODE", "CRON_SECRET", "VERCEL",
+        "INSTAGRAM_ACCOUNT_MODE", "ENCRYPTION_KEY",
+    ]
+    return {
+        k: ({"set": bool(os.environ.get(k)), "len": len(os.environ.get(k, ""))})
+        for k in keys
+    }
+
+
 # ── Mount the Instagram webhook/OAuth router too ─────────────
 from app.webhook.webhook import router as instagram_router  # noqa: E402
 from app.webhook.chatbotx import router as chatbotx_router  # noqa: E402
