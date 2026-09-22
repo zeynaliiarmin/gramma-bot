@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     # ChatbotX is the primary messaging automation platform that bypasses
     # Meta App Review / sanctions by using Login with Instagram OAuth.
     chatbotx_workspace_token: str = ""
+    chatbotx_api_channel_token: str = ""  # Channel token channel_token_... for API Channel
+    chatbotx_channel_token: str = ""  # alias for channel token
     chatbotx_base_url: str = "https://app.chatbotx.io/api"
     chatbotx_workspace_id: str = ""
     chatbotx_webhook_secret: str = ""

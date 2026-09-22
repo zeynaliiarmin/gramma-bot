@@ -390,6 +390,93 @@ async def api_autoreply_add(
         return {"ok": True, "id": rule.id}
 
 
+@app.delete("/api/auto-replies/{rule_id}")
+async def api_autoreply_delete(
+    rule_id: int,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    from app.services.autoreply import AutoReply
+
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, ident.user_id)
+        ids = [a.id for a in accounts]
+        rule = await session.get(AutoReply, rule_id)
+        if rule is None or rule.account_id not in ids:
+            raise HTTPError(404, "not_found_or_not_yours")
+        await session.delete(rule)
+        await session.commit()
+        return {"ok": True, "deleted": rule_id}
+
+
+@app.post("/api/auto-replies/delete")
+async def api_autoreply_delete_post(
+    body: dict,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    # Fallback POST for clients that can't DELETE
+    rule_id = (body or {}).get("id") or (body or {}).get("rule_id")
+    if not rule_id:
+        raise HTTPError(400, "missing id")
+    from app.services.autoreply import AutoReply
+
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, ident.user_id)
+        ids = [a.id for a in accounts]
+        rule = await session.get(AutoReply, int(rule_id))
+        if rule is None or rule.account_id not in ids:
+            raise HTTPError(404, "not_found_or_not_yours")
+        await session.delete(rule)
+        await session.commit()
+        return {"ok": True, "deleted": int(rule_id)}
+
+
+@app.post("/api/automation/test")
+async def api_automation_test(
+    body: dict,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    """Test automation rule matching for a sample message (without sending)."""
+    text = (body or {}).get("text") or (body or {}).get("message") or ""
+    account_id = (body or {}).get("account_id")
+    if not text:
+        raise HTTPError(400, "missing text")
+
+    async with SessionLocal() as session:
+        accounts = await get_accounts_for_user(session, ident.user_id)
+        if not accounts:
+            raise HTTPError(400, "no_accounts")
+        if account_id:
+            if account_id not in [a.id for a in accounts]:
+                raise HTTPError(403, "not_your_account")
+        else:
+            account_id = accounts[0].id
+
+        from app.services.autoreply import find_rule
+
+        rule = await find_rule(session, account_id, text)
+        if rule:
+            return {
+                "matched": True,
+                "rule_id": rule.id,
+                "keywords": rule.keywords,
+                "reply": rule.reply,
+                "dm_followup": rule.dm_followup,
+                "source": "rule",
+            }
+
+        # Try AI
+        try:
+            from app.services.ai import draft_reply
+
+            ai_reply = await draft_reply(text, locale="fa")
+            if ai_reply:
+                return {"matched": False, "ai": True, "reply": ai_reply, "source": "ai"}
+        except Exception as exc:
+            return {"matched": False, "error": str(exc)[:200], "source": "none"}
+
+        return {"matched": False, "source": "none"}
+
+
 # ── Anti-Block: daily usage, queue, safety alerts ────────────
 @app.get("/api/reply-usage")
 async def api_reply_usage(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
@@ -995,19 +1082,6 @@ async def api_integrations_status(ident: MiniAppIdentity = Depends(resolve_minia
             "mode": settings.instagram_account_mode,
         },
     }
-
-
-@app.post("/api/chatbotx-webhook")
-async def api_chatbotx_webhook(request: dict):
-    """Public webhook for ChatbotX inbound events (guarded by secret if set)."""
-    # This is called by ChatbotX when new messages/comments arrive
-    # For now, log and return ok — full processing can be added later
-    import json
-
-    logger.info("chatbotx webhook received: %s", json.dumps(request, ensure_ascii=False)[:1000])
-    # TODO: process inbound message, route to auto-reply engine
-    # For now, just acknowledge
-    return {"ok": True, "received": True}
 
 
 @app.post("/api/cleanup/manual")

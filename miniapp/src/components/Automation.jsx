@@ -36,6 +36,9 @@ const emptyStep = () => ({ action: 'send', text: '', use_ai: false, next_step_or
 
 export default function Automation() {
   const [scenarios, setScenarios] = useState(null)
+  const [simpleRules, setSimpleRules] = useState(null)
+  const [usage, setUsage] = useState(null)
+  const [cbxStatus, setCbxStatus] = useState(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [form, setForm] = useState(null) // scenario being edited (null = closed)
@@ -44,10 +47,23 @@ export default function Automation() {
   const [sample, setSample] = useState('')
   const [previewLoading, setPreviewLoading] = useState(false)
   const [messages, setMessages] = useState(null) // {account_id}
+  const [simpleForm, setSimpleForm] = useState({ keywords: '', reply: '', dm_followup: '', account_id: '' })
+  const [testMsg, setTestMsg] = useState('')
+  const [testResult, setTestResult] = useState(null)
 
   const load = useCallback(() => {
-    api('/api/automation/scenarios')
-      .then((d) => setScenarios(d.scenarios || []))
+    Promise.all([
+      api('/api/automation/scenarios'),
+      api('/api/auto-replies'),
+      api('/api/reply-usage'),
+      api('/api/chatbotx/status').catch(() => ({ enabled: false })),
+    ])
+      .then(([sc, rules, u, cbx]) => {
+        setScenarios(sc.scenarios || [])
+        setSimpleRules(rules.rules || [])
+        setUsage(u)
+        setCbxStatus(cbx)
+      })
       .catch((e) => setError(e.message))
   }, [])
 
@@ -147,6 +163,72 @@ export default function Automation() {
     />
   )
 
+  async function addSimpleRule(e) {
+    e.preventDefault()
+    if (!simpleForm.keywords.trim() || !simpleForm.reply.trim()) {
+      alert('کلمات کلیدی و پاسخ را وارد کنید')
+      return
+    }
+    setBusy(true)
+    try {
+      await api('/api/auto-replies', {
+        method: 'POST',
+        body: {
+          keywords: simpleForm.keywords,
+          reply: simpleForm.reply,
+          dm_followup: simpleForm.dm_followup,
+          account_id: simpleForm.account_id ? Number(simpleForm.account_id) : undefined,
+        }
+      })
+      setSimpleForm({ keywords: '', reply: '', dm_followup: '', account_id: simpleForm.account_id })
+      await load()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function deleteSimpleRule(id) {
+    if (!confirm('این قانون حذف شود؟')) return
+    try {
+      await api(`/api/auto-replies/${id}`, { method: 'DELETE' }).catch(async () => {
+        // Fallback: try via generic delete if endpoint not exists, use direct DB via custom endpoint
+        await api('/api/auto-replies/delete', { method: 'POST', body: { id } })
+      })
+      await load()
+    } catch (err) {
+      // If no delete endpoint, just reload and show message
+      setError('حذف از طریق API پیاده‌سازی نشده — از Supabase حذف کنید. ' + err.message)
+    }
+  }
+
+  async function testAutomation() {
+    if (!testMsg.trim()) {
+      alert('پیام تست را وارد کنید')
+      return
+    }
+    setTestResult(null)
+    try {
+      const res = await api('/api/chatbotx-webhook', {
+        method: 'POST',
+        body: {
+          data: {
+            conversation_id: 'test_conv_' + Date.now(),
+            contact_id: 'test_contact',
+            message: { text: testMsg },
+            type: 'dm',
+            channel: 'instagram',
+            contact: { name: 'تست' }
+          }
+        }
+      })
+      setTestResult(res)
+    } catch (err) {
+      setTestResult({ ok: false, error: err.message })
+    }
+  }
+
   return (
     <>
       <div className="card">
@@ -158,7 +240,93 @@ export default function Automation() {
           سناریوهای چندمرحله‌ای بسازید: کاربر «قیمت» بفرستد → ربات لیست قیمت را بفرستد →
           کاربر انتخاب کند → سفارش ثبت شود. پاسخ‌ها می‌توانند با AvalAI / OpenClaw هوشمند شوند.
           اولویت: کلمات کلیدی بالاتر از هوش مصنوعی و «همیشه» است.
+          <br />
+          <b>معماری جدید:</b> اینستاگرام → ChatbotX API Channel → Gramma Webhook → بررسی قوانین (Supabase) → پاسخ via ChatbotX API
         </p>
+      </div>
+
+      <div className="card">
+        <h3>📡 وضعیت کانال ChatbotX API</h3>
+        {cbxStatus ? (
+          <div style={{ fontSize: 12, lineHeight: 1.8 }}>
+            <div>فعال: {cbxStatus.enabled ? '✅ بله' : '❌ خیر'} · پیکربندی: {cbxStatus.configured ? '✅' : '❌'}</div>
+            <div>متصل: {cbxStatus.connected ? `✅ ${cbxStatus.username || '@zeynalikids'}` : '❌ غیرمتصل'}</div>
+            <div>Workspace: {cbxStatus.workspace_id || '1170629'} · Base: {cbxStatus.base_url || 'https://app.chatbotx.io/api'}</div>
+            {cbxStatus.error && <div style={{ color: 'var(--danger)' }}>⚠️ {cbxStatus.error}</div>}
+            <div style={{ marginTop: 8, fontSize: 11, color: 'var(--muted)' }}>
+              ⚠️ نکته: در پنل ChatbotX، AI Auto Reply و Flows داخلی را <b>خاموش</b> کنید تا دو بار پاسخ ندهد (ریسک بلاک).
+              <br />
+              Callback URL: <code>https://miniapp-five-inky.vercel.app/api/chatbotx-webhook</code>
+            </div>
+          </div>
+        ) : (
+          <div className="skeleton" style={{ height: 60 }} />
+        )}
+      </div>
+
+      {usage && (
+        <div className="card">
+          <h3>📊 آمار اتوماسیون</h3>
+          <div className="side-panel-holder">
+            <div className="stat">
+              <div className="num">{usage.totals?.replies_today ?? 0}</div>
+              <div className="lbl">پاسخ امروز</div>
+            </div>
+            <div className="stat">
+              <div className="num">{usage.totals?.queued ?? 0}</div>
+              <div className="lbl">در صف</div>
+            </div>
+            <div className="stat">
+              <div className="num">{simpleRules?.length ?? 0}</div>
+              <div className="lbl">قوانین ساده</div>
+            </div>
+            <div className="stat">
+              <div className="num">{scenarios?.length ?? 0}</div>
+              <div className="lbl">سناریو</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="card">
+        <h3>🔑 قوانین ساده (auto_replies)</h3>
+        <p style={{ fontSize: 11, color: 'var(--muted)' }}>
+          این قوانین در Supabase ذخیره می‌شوند و توسط ربات (نه ChatbotX) بررسی می‌شوند. کلمات کلیدی با کاما جدا کنید.
+        </p>
+        <form onSubmit={addSimpleRule} style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input className="input" placeholder="کلمات کلیدی: قیمت, هزینه, خرید" value={simpleForm.keywords} onChange={e => setSimpleForm({ ...simpleForm, keywords: e.target.value })} style={{ flex: 2 }} />
+            <input className="input" placeholder="ID پیج (اختیاری)" value={simpleForm.account_id} onChange={e => setSimpleForm({ ...simpleForm, account_id: e.target.value })} style={{ flex: 1 }} />
+          </div>
+          <textarea className="input" placeholder="پاسخ آماده..." value={simpleForm.reply} onChange={e => setSimpleForm({ ...simpleForm, reply: e.target.value })} rows={2} />
+          <input className="input" placeholder="فالوآپ دایرکت (اختیاری) — بعد از پاسخ کامنت" value={simpleForm.dm_followup} onChange={e => setSimpleForm({ ...simpleForm, dm_followup: e.target.value })} />
+          <button className="btn" type="submit" disabled={busy}>+ افزودن قانون</button>
+        </form>
+        {simpleRules && simpleRules.length === 0 && <div className="empty">قانونی تعریف نشده</div>}
+        {simpleRules && simpleRules.map(r => (
+          <div key={r.id} className="list-item">
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, fontSize: 12 }}>🔑 {r.keywords}</div>
+              <div style={{ fontSize: 11, color: 'var(--muted)' }}>{r.reply.slice(0, 120)}</div>
+              <div style={{ fontSize: 10, color: 'var(--muted)' }}>ID:{r.id} · اکانت:{r.account_id} · تطابق:{r.matches} · {r.enabled ? 'فعال' : 'غیرفعال'}</div>
+            </div>
+            <button className="btn small danger" onClick={() => deleteSimpleRule(r.id)}>🗑</button>
+          </div>
+        ))}
+      </div>
+
+      <div className="card">
+        <h3>🧪 تست اتوماسیون</h3>
+        <p style={{ fontSize: 11, color: 'var(--muted)' }}>یک پیام تستی بفرستید تا ببینید ربات چطور جواب می‌دهد (از طریق ChatbotX Webhook شبیه‌سازی می‌شود)</p>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input className="input" placeholder="پیام تست: قیمت؟" value={testMsg} onChange={e => setTestMsg(e.target.value)} style={{ flex: 1 }} />
+          <button className="btn" onClick={testAutomation}>تست</button>
+        </div>
+        {testResult && (
+          <div className={`banner ${testResult.ok ? 'ok' : 'err'}`} style={{ marginTop: 8, fontSize: 12 }}>
+            <pre style={{ whiteSpace: 'pre-wrap', fontSize: 11 }}>{JSON.stringify(testResult, null, 2)}</pre>
+          </div>
+        )}
       </div>
 
       {scenarios.length === 0 && (

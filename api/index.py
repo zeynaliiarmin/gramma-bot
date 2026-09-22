@@ -306,9 +306,11 @@ async def cron_trigger(job: str, request: Request):
 
 # ── Mount the Instagram webhook/OAuth router too ─────────────
 from app.webhook.webhook import router as instagram_router  # noqa: E402
+from app.webhook.chatbotx import router as chatbotx_router  # noqa: E402
 
 miniapp_app.include_router(_tg_router)
 miniapp_app.include_router(instagram_router)
+miniapp_app.include_router(chatbotx_router)
 
 # NOTE: we do NOT mount the FastAPI StaticFiles SPA here — Vercel serves the
 # built Mini-App (dist/) itself. Everything /api/* and the webhook paths are
