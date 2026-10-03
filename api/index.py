@@ -40,12 +40,55 @@ os.environ.setdefault("RUN_MODE", "webhook")
 
 logger = logging.getLogger("gramma.vercel")
 
-from fastapi import Request, Response  # noqa: E402
 
-from app.core.config import get_settings  # noqa: E402
-from app.webapp.main import app as miniapp_app  # noqa: E402 (asgi base)
+def _report_boot_error(tb: str) -> None:
+    """Last-resort beacon: ship the import-time traceback to Supabase REST.
 
-settings = get_settings()
+    On serverless we cannot read runtime logs; if the import chain dies, the
+    only way to learn WHY is to push the traceback somewhere we can read.
+    Never raises itself.
+    """
+    try:
+        import json
+        import urllib.request
+
+        srk = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+        base = os.environ.get("SUPABASE_URL", "")
+        if not srk or not base:
+            return
+        row = {
+            "action": "boot_error",
+            "detail": tb[:1900],
+            "level": "error",
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+        }
+        req = urllib.request.Request(
+            base.rstrip("/") + "/rest/v1/activity_logs",
+            data=json.dumps(row).encode(),
+            method="POST",
+            headers={
+                "apikey": srk,
+                "Authorization": f"Bearer {srk}",
+                "Content-Type": "application/json",
+            },
+        )
+        urllib.request.urlopen(req, timeout=8)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+try:
+    from fastapi import Request, Response  # noqa: E402
+
+    from app.core.config import get_settings  # noqa: E402
+    from app.webapp.main import app as miniapp_app  # noqa: E402 (asgi base)
+
+    settings = get_settings()
+except Exception:  # noqa: BLE001
+    import traceback as _tb
+
+    _report_boot_error(_tb.format_exc())
+    raise
 
 # Import shared state so test/health code can observe that an update arrived.
 import app.core.shared_state as shared  # noqa: E402
@@ -416,7 +459,14 @@ async def _serverless_handler(scope, receive, send):
         await _warmup()
     except Exception:  # noqa: BLE001
         logger.warning("db warmup failed (continuing)")
-    await miniapp_app(scope, receive, send)
+    try:
+        await miniapp_app(scope, receive, send)
+    except Exception:  # noqa: BLE001
+        # Runtime beacon — makes invisible serverless crashes diagnosable.
+        import traceback as _tb
+
+        _report_boot_error(f"runtime: scope={scope.get('path','?')}\n{_tb.format_exc()}")
+        raise
 
 
 # Vercel loads this `app` as the ASGI callable.
