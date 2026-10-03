@@ -8,6 +8,7 @@ aiogram>=3.7,<4
 
 # ── Database (async) ─────────────────────────────────────────
 SQLAlchemy>=2.0,<3
+greenlet>=3.0
 asyncpg>=0.29            # PostgreSQL async driver (production)
 aiosqlite>=0.20          # SQLite async driver (local/dev fallback)
 
