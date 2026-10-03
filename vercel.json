@@ -6,8 +6,7 @@
   "builds": [
     {
       "src": "api/index.py",
-      "use": "@vercel/python",
-      "maxDuration": 60
+      "use": "@vercel/python"
     },
     {
       "src": "miniapp/dist/**",
