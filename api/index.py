@@ -386,6 +386,8 @@ async def diag_env(request: Request):
         "CHATBOTX_WORKSPACE_ID", "CHATBOTX_WORKSPACE_TOKEN",
         "CHATBOTX_API_CHANNEL_TOKEN", "RUN_MODE", "CRON_SECRET", "VERCEL",
         "INSTAGRAM_ACCOUNT_MODE", "ENCRYPTION_KEY",
+        "OPENCLAW_BASE_URL", "OPENCLAW_TOKEN", "OPENCLAW_PUBLISH_TIMEOUT",
+        "BROWSER_USE_API_KEY", "INSTAGRAM_PUBLISH_MIN_INTERVAL_MINUTES",
     ]
     return {
         k: ({"set": bool(os.environ.get(k)), "len": len(os.environ.get(k, ""))})

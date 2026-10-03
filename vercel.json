@@ -3,6 +3,11 @@
   "version": 2,
   "installCommand": "cd miniapp && npm install",
   "buildCommand": "cd miniapp && npm run build",
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60
+    }
+  },
   "builds": [
     {
       "src": "api/index.py",

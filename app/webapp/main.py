@@ -1045,12 +1045,91 @@ async def api_instagram_publisher_publish(
         raise HTTPError(500, str(exc)[:500])
 
 
+@app.post("/api/publish")
+async def api_publish(request: Request):
+    """Unified Instagram publish endpoint — gateway-first.
+
+    Auth: EITHER a valid Mini-App session ticket (``X-Mini-App-Hash``) OR the
+    shared automation secret (``X-Cron-Secret``). Anything else → 401.
+
+    Body: ``{account_id, image_url, caption, media_type}`` where media_type is
+    one of post|story|reel|carousel.
+
+    Safety limits are enforced inside the publisher:
+      * daily cap (INSTAGRAM_PUBLISH_DAILY_LIMIT, default 3/day)
+      * minimum spacing (INSTAGRAM_PUBLISH_MIN_INTERVAL_MINUTES, default 30)
+    Publishing happens through the OpenClaw gateway (Browser Use Cloud), with
+    fallbacks to instagrapi (local) and mock.
+    """
+    import hmac as _hmac
+
+    from app.webapp.auth import verify_ticket
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        raise HTTPError(400, "invalid json")
+    body = body or {}
+
+    # ── auth ──
+    user_id: int | None = None
+    cron_secret = settings.cron_secret
+    provided = request.headers.get("X-Cron-Secret", "")
+    if cron_secret and provided and _hmac.compare_digest(provided.encode(), cron_secret.encode()):
+        user_id = None  # automation context
+    else:
+        identity = verify_ticket(request.headers.get("X-Mini-App-Hash", ""))
+        if identity is None:
+            raise HTTPError(401, "unauthorized")
+        user_id = identity.user_id
+
+    # ── validate ──
+    account_id = body.get("account_id")
+    if not account_id:
+        raise HTTPError(400, "missing account_id")
+    try:
+        account_id = int(account_id)
+    except (TypeError, ValueError):
+        raise HTTPError(400, "account_id must be an integer")
+
+    if user_id is not None:
+        async with SessionLocal() as session:
+            accounts = await get_accounts_for_user(session, user_id)
+            if account_id not in [a.id for a in accounts]:
+                raise HTTPError(403, "not_your_account")
+
+    image_url = body.get("image_url") or ""
+    caption = body.get("caption") or ""
+    media_type = body.get("media_type") or "post"
+    if media_type not in ("post", "story", "reel", "carousel"):
+        raise HTTPError(400, "invalid media_type (post|story|reel|carousel)")
+    if not image_url and media_type != "carousel":
+        raise HTTPError(400, "image_url is required")
+
+    from app.services.instagram_publisher import InstagramPublishError, get_publisher
+
+    try:
+        result = await get_publisher().publish_post(
+            account_id=account_id,
+            image_url=image_url,
+            caption=caption,
+            media_type=media_type,
+            user_id=user_id,
+        )
+        return {"ok": True, **result}
+    except InstagramPublishError as exc:
+        # Rate-limit / safety errors → 429 with the Persian message
+        return JSONResponse(status_code=429, content={"ok": False, "error": str(exc)})
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("api_publish failed")
+        raise HTTPError(500, str(exc)[:300])
+
+
 @app.get("/api/integrations/status")
 async def api_integrations_status(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
     """Combined status of all integrations for Mini-App."""
     from app.services.chatbotx_service import get_chatbotx_client
     from app.services.instagram_publisher import get_publisher
-
     # ChatbotX
     cbx_client = get_chatbotx_client()
     cbx_status = {"enabled": cbx_client.enabled, "configured": cbx_client.enabled}
@@ -1067,6 +1146,32 @@ async def api_integrations_status(ident: MiniAppIdentity = Depends(resolve_minia
         pub_status = await pub.get_status()
     except Exception as exc:
         pub_status = {"enabled": False, "error": str(exc)[:200]}
+
+    # OpenClaw gateway (publishing brain — Browser Use Cloud)
+    from urllib.parse import urlparse
+
+    openclaw_status = {
+        "configured": bool(settings.openclaw_base_url and settings.openclaw_token),
+        "gateway_host": "",
+        "browser_use_key_set": bool(settings.browser_use_api_key),
+        "publish_timeout_s": settings.openclaw_publish_timeout,
+        "reachable": None,
+    }
+    if openclaw_status["configured"]:
+        try:
+            openclaw_status["gateway_host"] = urlparse(settings.openclaw_base_url).netloc
+        except Exception:  # noqa: BLE001
+            pass
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                probe = await client.get(settings.openclaw_base_url)
+            openclaw_status["reachable"] = True
+            openclaw_status["http_status"] = probe.status_code
+        except Exception as exc:  # noqa: BLE001
+            openclaw_status["reachable"] = False
+            openclaw_status["error"] = str(exc)[:150]
 
     # Daily reply usage (reuse logic)
     from app.services import limits
@@ -1088,6 +1193,7 @@ async def api_integrations_status(ident: MiniAppIdentity = Depends(resolve_minia
     return {
         "chatbotx": cbx_status,
         "instagram_publisher": pub_status,
+        "openclaw": openclaw_status,
         "reply_limits": summary,
         "meta_app": {
             "configured": bool(settings.meta_app_id and settings.meta_app_secret),

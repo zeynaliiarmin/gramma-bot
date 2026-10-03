@@ -52,11 +52,17 @@ def new_client(transport=None, base_url="http://127.0.0.1:18789", token="", time
 
 
 # ── config wiring ────────────────────────────────────────────────
-def test_config_openclaw_defaults():
-    from app.core.config import get_settings
+def test_config_openclaw_defaults(monkeypatch):
+    from app.core.config import Settings
 
-    s = get_settings()
-    # Defaults (no .env overrides) are the OpenClaw gateway defaults…
+    # Hermetic: bypass the repo .env (it legitimately holds deployment
+    # values) and clear any inherited env so pure defaults are asserted.
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "000:test")
+    monkeypatch.setenv("ENCRYPTION_KEY", "9f6Bd2S19LFy/SQ/9Om4559N1Lgi5upd2zZGwvITWOA=")
+    for k in ("OPENCLAW_BASE_URL", "OPENCLAW_TIMEOUT", "OPENCLAW_TOKEN", "OPENCLAW_PUBLISH_TIMEOUT"):
+        monkeypatch.delenv(k, raising=False)
+    s = Settings(_env_file=None)
+    # Defaults are the local OpenClaw gateway defaults…
     assert s.openclaw_base_url == "http://127.0.0.1:18789"
     assert s.openclaw_timeout == 30.0
     assert isinstance(s.openclaw_token, str)  # may be "" (default) or a real token

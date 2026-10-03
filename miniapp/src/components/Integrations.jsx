@@ -57,8 +57,18 @@ export default function Integrations() {
 
   const cbx = status.chatbotx || {}
   const pub = status.instagram_publisher || {}
+  const oc = status.openclaw || {}
   const limits = status.reply_limits || {}
   const meta = status.meta_app || {}
+
+  // OpenClaw gateway health → badge for the publishing card
+  const gwConfigured = !!(pub.gateway && pub.gateway.configured) || !!oc.configured
+  const gwReachable = oc.reachable === true
+  const gwBadge = gwConfigured
+    ? (gwReachable ? '✅ درگاه متصل' : (oc.reachable === false ? '⚠️ درگاه قطع' : '🛰 درگاه فعال'))
+    : '❌ بدون درگاه'
+  const gwColor = gwConfigured ? (gwReachable ? 'green' : '#856404') : '#721c24'
+  const gwBg = gwConfigured ? (gwReachable ? '#e6f9ed' : '#fff3cd') : '#f8d7da'
 
   return (
     <>
@@ -102,18 +112,19 @@ export default function Integrations() {
               fontSize: 11,
               padding: '2px 8px',
               borderRadius: 10,
-              background: pub.enabled ? (pub.instagrapi_installed ? '#e6f9ed' : '#fff3cd') : '#f8d7da',
-              color: pub.enabled ? (pub.instagrapi_installed ? 'green' : '#856404') : '#721c24'
+              background: gwBg,
+              color: gwColor
             }}>
-              {pub.enabled ? (pub.instagrapi_installed ? '✅ آماده' : '🧪 شبیه‌سازی') : '❌ غیرفعال'}
+              {gwBadge}
             </span>
           </div>
           <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-            حالت: <b>{pub.mode || 'private-enabled'}</b> · سقف: {fmt(pub.daily_limit || 3)} پست/روز/پیج<br />
-            instagrapi: {pub.instagrapi_installed ? '✅ نصب شده' : '❌ نصب نیست (حالت mock)'}<br />
-            یوزرنیم: {pub.username || 'تنظیم نشده'} · اعتبار: {pub.credentials_set ? '✅ ست شده' : '⚠️ ست نشده'}<br />
-            ⚠️ هشدار: API خصوصی اینستاگرام ریسک بلاک دارد — با محدودیت 3 پست/روز استفاده کنید.<br />
-            نصب: <code>openclaw skills install clinstagram</code> سپس <code>clinstagram.config.mode = "private-enabled"</code>
+            مسیر انتشار: {gwConfigured ? <>درگاه OpenClaw + Browser Use Cloud (<b>{(pub.gateway && pub.gateway.host) || oc.gateway_host || '—'}</b>)</> : 'درگاه تنظیم نشده'}<br />
+            Browser Use: {(pub.gateway && pub.gateway.browser_use_key_set) || oc.browser_use_key_set ? '✅ کلید ست شده' : '⚠️ کلید ست نشده'}<br />
+            محدودیت: {fmt(pub.daily_limit || 3)} پست/روز · حداقل {fmt(pub.min_interval_minutes || 30)} دقیقه فاصله بین انتشارها<br />
+            حالت پشتیبان: {pub.instagrapi_installed ? 'instagrapi نصب است' : 'بدون instagrapi (فقط درگاه)'}<br />
+            ⚠️ تونل فعلی موقتی است؛ اگر ترموکس بسته شود، درگاه قطع می‌شود.
+            {oc.reachable === false && oc.error && <><br />⚠️ خطای درگاه: {oc.error}</>}
             {pub.error && <><br />⚠️ {pub.error}</>}
           </div>
         </div>

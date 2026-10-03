@@ -74,6 +74,12 @@ class Settings(BaseSettings):
     openclaw_base_url: str = "http://127.0.0.1:18789"
     openclaw_token: str = ""
     openclaw_timeout: float = 30.0
+    # Browser-automation publishing through the OpenClaw gateway (Browser Use
+    # Cloud). Publishing takes much longer than AI prompts → own timeout.
+    openclaw_publish_timeout: float = 55.0
+    browser_use_api_key: str = ""
+    # Minimum spacing between two Instagram publishes per account (minutes).
+    instagram_publish_min_interval_minutes: int = 30
 
     # ── ChatbotX (Instagram automation via Login with Instagram) ──
     # ChatbotX is the primary messaging automation platform that bypasses

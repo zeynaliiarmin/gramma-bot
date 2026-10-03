@@ -98,6 +98,46 @@ class InstagramPublisher:
             "exceeded": count >= self.daily_limit,
         }
 
+    async def _check_min_interval(self, account_id: int) -> None:
+        """Enforce the minimum spacing between publishes (anti-block).
+
+        Raises InstagramPublishError when the previous publish is newer than
+        ``INSTAGRAM_PUBLISH_MIN_INTERVAL_MINUTES`` (default 30).
+        """
+        from datetime import timedelta
+
+        from sqlalchemy import select
+
+        from app.core.database import SessionLocal
+        from app.models import ActivityLog
+
+        minutes = settings.instagram_publish_min_interval_minutes or 30
+        async with SessionLocal() as session:
+            last = (
+                await session.execute(
+                    select(ActivityLog.created_at)
+                    .where(
+                        ActivityLog.account_id == account_id,
+                        ActivityLog.action == "instagram_publish",
+                    )
+                    .order_by(ActivityLog.created_at.desc())
+                    .limit(1)
+                )
+            ).scalar()
+        if last is None:
+            return
+        now = datetime.now(timezone.utc)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        delta = now - last
+        if delta < timedelta(minutes=minutes):
+            remaining = timedelta(minutes=minutes) - delta
+            mins = int(remaining.total_seconds() // 60) + 1
+            raise InstagramPublishError(
+                f"⏳ برای جلوگیری از بلاک، بین دو انتشار باید حداقل {minutes} دقیقه فاصله باشد. "
+                f"حدود {mins} دقیقه دیگر دوباره تلاش کنید."
+            )
+
     async def publish_post(
         self,
         account_id: int,
@@ -137,72 +177,118 @@ class InstagramPublisher:
         if media_type != "carousel" and not image_url and not image_urls:
             raise InstagramPublishError("آدرس تصویر/ویدیو الزامی است")
 
-        # Try instagrapi if enabled
-        client = self._get_instagrapi_client() if self.enabled else None
+        # Minimum spacing between publishes (anti-block) — raises if too soon
+        await self._check_min_interval(account_id)
 
-        if client is None:
-            # Mock mode — simulate success for testing
-            logger.info(
-                "mock publish: account=%s type=%s caption=%.50s",
-                account_id, media_type, caption,
-            )
-            result = {
-                "ok": True,
-                "mock": True,
-                "media_id": f"mock_{account_id}_{int(datetime.now(timezone.utc).timestamp())}",
-                "permalink": f"https://instagram.com/p/mock_{account_id}/",
-                "media_type": media_type,
-                "caption": caption,
-                "warning": "حالت شبیه‌سازی — instagrapi نصب نیست یا غیرفعال است. برای انتشار واقعی، OpenClaw را با clinstagram نصب کنید.",
-            }
-        else:
-            # Real publish via instagrapi
+        result: Optional[Dict[str, Any]] = None
+
+        # 1) Preferred path: OpenClaw gateway → Browser Use Cloud.
+        #    This is the ONLY publishing route that works from the Vercel
+        #    serverless runtime (no Meta app, no local instagrapi needed).
+        if settings.openclaw_base_url and settings.openclaw_token:
+            from app.core.database import SessionLocal
+            from app.models import InstagramAccount
+            from app.services.openclaw import OpenClawError, publish_post_via_gateway
+
+            username_hint = ""
             try:
-                # instagrapi is sync, run in thread
-                import asyncio
-
-                def _do_publish():
-                    if media_type == "story":
-                        # client.photo_upload_to_story or video_upload_to_story
-                        if image_url:
-                            return client.photo_upload_to_story(image_url, caption)
-                        raise ValueError("story needs image_url")
-                    elif media_type == "reel":
-                        if image_url:
-                            return client.clip_upload(image_url, caption)
-                        raise ValueError("reel needs video URL")
-                    elif media_type == "carousel":
-                        # album_upload
-                        urls = image_urls or []
-                        return client.album_upload(urls, caption)
-                    else:  # post
-                        if image_url:
-                            # Detect video vs photo by extension
-                            if image_url.lower().endswith((".mp4", ".mov")):
-                                return client.video_upload(image_url, caption)
-                            return client.photo_upload(image_url, caption)
-                        raise ValueError("post needs image_url")
-
-                # Run sync client in thread pool
-                result_raw = await asyncio.to_thread(_do_publish)
+                async with SessionLocal() as session:
+                    acc = await session.get(InstagramAccount, account_id)
+                    username_hint = acc.username if acc else ""
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                reply = await publish_post_via_gateway(
+                    image_url=image_url or "",
+                    caption=caption,
+                    media_type=media_type,
+                    image_urls=image_urls,
+                    user_id=user_id,
+                    account_id=account_id,
+                    username_hint=username_hint,
+                )
                 result = {
                     "ok": True,
                     "mock": False,
-                    "media_id": str(getattr(result_raw, "id", "") or getattr(result_raw, "pk", "") or "unknown"),
-                    "permalink": f"https://instagram.com/p/{getattr(result_raw, 'code', 'unknown')}/",
+                    "via": "openclaw_gateway",
+                    "media_id": "",
+                    "permalink": "",
                     "media_type": media_type,
-                    "raw": str(result_raw)[:500],
+                    "gateway_reply": (reply or "")[:500],
+                    "note": "انتشار از طریق درگاه OpenClaw انجام شد؛ نتیجه دقیق در گزارش درگاه ثبت است.",
                 }
-            except Exception as exc:
-                logger.exception("instagrapi publish failed")
-                # Check for block / rate limit
-                msg = str(exc).lower()
-                if "block" in msg or "spam" in msg or "429" in msg or "rate" in msg:
-                    raise InstagramPublishError(
-                        f"⚠️ اینستاگرام درخواست را مسدود کرد (احتمال بلاک موقت). "
-                        f"لطفا 24 ساعت صبر کنید و دوباره تلاش کنید. خطا: {exc}"
-                    ) from exc
-                raise InstagramPublishError(f"انتشار ناموفق بود: {exc}") from exc
+            except OpenClawError as exc:
+                logger.warning("openclaw gateway publish failed, falling back: %s", exc)
+                result = None  # fall back below
+
+        # 2) Fallback: instagrapi (private API, only when running locally)
+        if result is None:
+            client = self._get_instagrapi_client() if self.enabled else None
+
+            if client is None:
+                # Mock mode — simulate success for testing
+                logger.info(
+                    "mock publish: account=%s type=%s caption=%.50s",
+                    account_id, media_type, caption,
+                )
+                result = {
+                    "ok": True,
+                    "mock": True,
+                    "media_id": f"mock_{account_id}_{int(datetime.now(timezone.utc).timestamp())}",
+                    "permalink": f"https://instagram.com/p/mock_{account_id}/",
+                    "media_type": media_type,
+                    "caption": caption,
+                    "warning": "حالت شبیه‌سازی — درگاه OpenClaw در دسترس نیست و instagrapi هم نصب نیست.",
+                }
+            else:
+                # Real publish via instagrapi
+                try:
+                    # instagrapi is sync, run in thread
+                    import asyncio
+
+                    def _do_publish():
+                        if media_type == "story":
+                            # client.photo_upload_to_story or video_upload_to_story
+                            if image_url:
+                                return client.photo_upload_to_story(image_url, caption)
+                            raise ValueError("story needs image_url")
+                        elif media_type == "reel":
+                            if image_url:
+                                return client.clip_upload(image_url, caption)
+                            raise ValueError("reel needs video URL")
+                        elif media_type == "carousel":
+                            # album_upload
+                            urls = image_urls or []
+                            return client.album_upload(urls, caption)
+                        else:  # post
+                            if image_url:
+                                # Detect video vs photo by extension
+                                if image_url.lower().endswith((".mp4", ".mov")):
+                                    return client.video_upload(image_url, caption)
+                                return client.photo_upload(image_url, caption)
+                            raise ValueError("post needs image_url")
+
+                    # Run sync client in thread pool
+                    result_raw = await asyncio.to_thread(_do_publish)
+                    result = {
+                        "ok": True,
+                        "mock": False,
+                        "via": "instagrapi",
+                        "media_id": str(getattr(result_raw, "id", "") or getattr(result_raw, "pk", "") or "unknown"),
+                        "permalink": f"https://instagram.com/p/{getattr(result_raw, 'code', 'unknown')}/",
+                        "media_type": media_type,
+                        "raw": str(result_raw)[:500],
+                    }
+                except Exception as exc:
+                    logger.exception("instagrapi publish failed")
+                    # Check for block / rate limit
+                    msg = str(exc).lower()
+                    if "block" in msg or "spam" in msg or "429" in msg or "rate" in msg:
+                        raise InstagramPublishError(
+                            f"⚠️ اینستاگرام درخواست را مسدود کرد (احتمال بلاک موقت). "
+                            f"لطفا 24 ساعت صبر کنید و دوباره تلاش کنید. خطا: {exc}"
+                        ) from exc
+                    raise InstagramPublishError(f"انتشار ناموفق بود: {exc}") from exc
 
         # Log activity
         try:
@@ -239,14 +325,27 @@ class InstagramPublisher:
         except ImportError:
             client_available = False
 
+        gateway_configured = bool(settings.openclaw_base_url and settings.openclaw_token)
+        try:
+            from urllib.parse import urlparse
+
+            gw_host = urlparse(settings.openclaw_base_url).netloc if gateway_configured else ""
+        except Exception:  # noqa: BLE001
+            gw_host = ""
         status = {
-            "enabled": self.enabled,
+            "enabled": self.enabled or gateway_configured,
             "mode": settings.instagram_publish_mode,
             "daily_limit": self.daily_limit,
+            "min_interval_minutes": settings.instagram_publish_min_interval_minutes,
             "instagrapi_installed": client_available,
             "credentials_set": bool(settings.instagram_username and settings.instagram_password),
             "username": settings.instagram_username or None,
-            "mock_mode": not self.enabled or not client_available,
+            "mock_mode": not gateway_configured and (not self.enabled or not client_available),
+            "gateway": {
+                "configured": gateway_configured,
+                "host": gw_host,
+                "browser_use_key_set": bool(settings.browser_use_api_key),
+            },
         }
 
         if account_id:

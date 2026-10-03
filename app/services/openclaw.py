@@ -114,18 +114,19 @@ class OpenClawClient:
             )
             raise OpenClawError("OpenClaw is disabled (OPENCLAW_BASE_URL not set)")
 
-        # OpenClaw lives on the user's phone (127.0.0.1) — from the Vercel
-        # serverless runtime it is unreachable. Fail FAST (raise) instead of
-        # blocking the request for the full 30s timeout. Callers already
-        # catch OpenClawError and fall back to AvalAI/templates.
+        # Product policy for the serverless runtime (VERCEL=1):
+        #  * AI text tasks (captions/replies/ideas/…) must go DIRECTLY to
+        #    AvalAI — never through the OpenClaw gateway.
+        #  * The ONLY allowed gateway task is Instagram publishing
+        #    (``task="instagram_publish"``), which drives Browser Use Cloud.
         import os
 
-        if os.environ.get("VERCEL") == "1":
+        if os.environ.get("VERCEL") == "1" and task != "instagram_publish":
             await record_openclaw_activity(
                 user_id, account_id, f"openclaw_{task}",
-                "skipped: unreachable on serverless runtime (VERCEL=1)", "info",
+                "skipped: AI tasks use AvalAI directly on serverless (policy)", "info",
             )
-            raise OpenClawError("OpenClaw در محیط سرورلس در دسترس نیست")
+            raise OpenClawError("در محیط سرورلس، کارهای متنی مستقیم به AvalAI می‌روند")
 
         payload = {
             "message": message,
@@ -272,6 +273,85 @@ async def suggest_dm_reply(
         user_id=user_id,
         account_id=account_id,
     )
+
+
+# ── Instagram publishing via OpenClaw gateway + Browser Use Cloud ──
+# NOTE: intentionally NOT gated by the VERCEL=1 AI guard. The gateway is the
+# official publishing path (reaches Instagram through Browser Use Cloud),
+# while AI text tasks stay on AvalAI per product policy.
+
+_MEDIA_FA = {
+    "post": "پست معمولی (خوراک)",
+    "story": "استوری",
+    "reel": "ریلز",
+    "carousel": "پست چندتصویره (کاروسل)",
+}
+
+
+async def publish_post_via_gateway(
+    image_url: str,
+    caption: str,
+    media_type: str = "post",
+    image_urls: list[str] | None = None,
+    user_id: Optional[int] = None,
+    account_id: Optional[int] = None,
+    username_hint: str = "",
+) -> str:
+    """Ask the OpenClaw gateway to publish to Instagram via Browser Use Cloud.
+
+    The gateway drives a real browser session: login (stored credentials),
+    upload media from the public URL, paste the caption and publish.
+
+    Returns the gateway's reply text. Raises OpenClawError on any failure.
+    Uses a dedicated longer timeout (``OPENCLAW_PUBLISH_TIMEOUT``).
+    """
+    client = get_openclaw_client()
+    if not client.enabled:
+        raise OpenClawError("OpenClaw gateway is not configured (OPENCLAW_BASE_URL)")
+
+    import os
+
+    urls = list(image_urls or [])
+    if image_url:
+        urls.insert(0, image_url)
+    media_lines = "\n".join(f"  - {u}" for u in urls) or "  - (آدرسی داده نشده!)"
+    kind = _MEDIA_FA.get(media_type, media_type)
+
+    message = (
+        f"با مرورگر وارد اینستاگرام شو (نام کاربری پیج مقصد: {username_hint or 'zeynalikids'}) "
+        f"و یک «{kind}» جدید منتشر کن.\n"
+        f"مراحل دقیق:\n"
+        f"۱) اگر لاگین نیستی، با اعتبارنامه‌های ذخیره‌شده وارد اینستاگرام شو.\n"
+        f"۲) رسانه(ها) را از این آدرس(ها) بارگذاری کن:\n{media_lines}\n"
+        f"۳) این کپشن را دقیقاً وارد کن:\n«\"\"{caption}\"\"»\n"
+        f"۴) دکمه انتشار (Share/پست) را بزن و صبر کن تا تأیید انتشار را ببینی.\n"
+        f"۵) در پایان فقط یک خط گزارش بده: موفق یا ناموفق + دلیل/لینک پست."
+    )
+
+    context = {
+        "kind": "instagram_publish",
+        "media_type": media_type,
+        "image_urls": urls,
+        "caption": caption,
+        "instagram_username": username_hint or "",
+        "browser_use": bool(settings.browser_use_api_key),
+    }
+
+    # Longer timeout for browser automation (own client instance).
+    pub_client = OpenClawClient(timeout=settings.openclaw_publish_timeout)
+    if os.environ.get("VERCEL") == "1":
+        await record_openclaw_activity(
+            user_id, account_id, "openclaw_instagram_publish",
+            f"publish start type={media_type} urls={len(urls)} via public gateway", "info",
+        )
+    reply = await pub_client.ask(
+        message,
+        context=context,
+        task="instagram_publish",
+        user_id=user_id,
+        account_id=account_id,
+    )
+    return reply
 
 
 async def generate_post_ideas(
