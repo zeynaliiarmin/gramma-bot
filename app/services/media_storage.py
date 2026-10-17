@@ -16,6 +16,7 @@ from aiogram import Bot
 from aiogram.types import Message
 
 from app.core.config import get_settings
+from app.services.limits import TELEGRAM_BOT_DOWNLOAD_MAX_BYTES
 
 settings = get_settings()
 
@@ -115,6 +116,73 @@ async def save_telegram_photo_to_supabase(bot: Bot, message: Message) -> str:
         telegram_file = await bot.get_file(message.photo[-1].file_id)
         await bot.download_file(telegram_file.file_path, destination=local_path)
         return await upload_to_supabase_storage(local_path, "jpg")
+    finally:
+        local_path.unlink(missing_ok=True)
+
+
+class TelegramPostMediaError(ValueError):
+    """Safe, user-facing validation error for a Telegram draft attachment."""
+
+
+def describe_telegram_post_media(message: Message) -> dict:
+    """Accept only Telegram photos and supported MP4/MOV videos, not documents."""
+    if message.photo:
+        media = message.photo[-1]
+        kind, ext = "image", "jpg"
+        duration = None
+        mime = "image/jpeg"
+    elif message.video:
+        media = message.video
+        kind = "video"
+        mime = (media.mime_type or "").lower()
+        if mime not in ("video/mp4", "video/quicktime"):
+            raise TelegramPostMediaError("فقط ویدیوی MP4 یا MOV قابل افزودن به پست است.")
+        ext = "mov" if mime == "video/quicktime" else "mp4"
+        suffix = os.path.splitext((media.file_name or "").lower())[1].lstrip(".")
+        if suffix in ("mp4", "mov") and suffix != ext:
+            raise TelegramPostMediaError("پسوند و نوع ویدیو یکسان نیست؛ فایل را دوباره ارسال کنید.")
+        duration = media.duration
+        max_duration = 60 if message.media_group_id else 90
+        if not isinstance(duration, int) or not 3 <= duration <= max_duration:
+            raise TelegramPostMediaError(
+                f"مدت ویدیو باید بین 3 و {max_duration} ثانیه باشد."
+            )
+    else:
+        raise TelegramPostMediaError("برای این مسیر عکس یا ویدیوی تکی/آلبومی بفرستید.")
+    if not isinstance(media.width, int) or not isinstance(media.height, int) or media.height < 1:
+        raise TelegramPostMediaError("ابعاد رسانه مشخص نیست.")
+    ratio = media.width / media.height
+    if kind == "video" and not message.media_group_id:
+        if not 0.52 <= ratio <= 0.61:
+            raise TelegramPostMediaError("ویدیوی تکی به‌صورت ریلز منتشر می‌شود و باید عمودی 9:16 باشد.")
+    elif not 0.55 <= ratio <= 1.93:
+        raise TelegramPostMediaError("نسبت تصویر پست باید در محدودهٔ مستند Instagram باشد.")
+    size = media.file_size
+    if size is not None and size > TELEGRAM_BOT_DOWNLOAD_MAX_BYTES:
+        raise TelegramPostMediaError("بات فایل بزرگ‌تر از 20 MB را دریافت نمی‌کند؛ فایل کوچک‌تری بفرستید (آپلود مستقیم هنوز فعال نیست).")
+    return {
+        "kind": kind, "ext": ext, "mime": mime, "duration": duration,
+        "file_id": media.file_id, "file_size": size,
+        "width": media.width, "height": media.height,
+    }
+
+
+async def save_telegram_post_media_to_supabase(bot: Bot, message: Message, media_info: dict) -> str:
+    """Download a bounded Telegram file, upload it durably, erase /tmp."""
+    if not settings.supabase_url or not settings.supabase_service_role_key:
+        raise TelegramPostMediaError("فضای نگهداری رسانه تنظیم نشده است؛ چیزی در صف انتشار ثبت نشد.")
+    tg_file = await bot.get_file(media_info["file_id"])
+    size = tg_file.file_size or media_info.get("file_size")
+    if size is None or size <= 0 or size > TELEGRAM_BOT_DOWNLOAD_MAX_BYTES:
+        raise TelegramPostMediaError("اندازهٔ فایل نامشخص یا خارج از سقف دانلود 20 MB بات است.")
+    if not tg_file.file_path:
+        raise TelegramPostMediaError("دریافت فایل از تلگرام ممکن نیست.")
+    local_path = UPLOAD_DIR / f"{uuid.uuid4().hex}.{media_info['ext']}"
+    try:
+        await bot.download_file(tg_file.file_path, destination=local_path)
+        if not 0 < local_path.stat().st_size <= TELEGRAM_BOT_DOWNLOAD_MAX_BYTES:
+            raise TelegramPostMediaError("فایل دریافت‌شده خالی یا بزرگ‌تر از سقف دانلود بات است.")
+        return await upload_to_supabase_storage(local_path, media_info["ext"])
     finally:
         local_path.unlink(missing_ok=True)
 

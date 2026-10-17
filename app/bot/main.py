@@ -24,6 +24,7 @@ from app.bot.handlers import (
     insights,
     navigation,
     outbound,
+    telegram_drafts,
     publish,
     schedule,
     search,
@@ -63,7 +64,7 @@ def build_dispatcher() -> Dispatcher:
     dp.errors.middleware(ErrorHandlerMiddleware())
 
     for module in (
-        outbound, account, ai, calendar, collab, community, direct,
+        telegram_drafts, outbound, account, ai, calendar, collab, community, direct,
         insights, navigation, publish, schedule, search, studio,
     ):
         dp.include_router(module.router)

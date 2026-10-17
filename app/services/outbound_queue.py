@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models import ActivityLog, InstagramAccount, Post
+from app.services.instagram_options import InstagramOptionError, validate_instagram_options
 from app.services.limits import ZERNIO_POST_DAILY_LIMIT, ZERNIO_POST_MIN_SPACING_SECONDS
 from app.services.zernio_publishing import (
     ZernioPublishError,
@@ -87,6 +88,7 @@ async def enqueue_zernio_post(
     telegram_chat_id: int | None = None,
     telegram_message_id: int | None = None,
     legacy_post_id: int | None = None,
+    instagram_options: dict | None = None,
 ) -> dict:
     """Insert exactly one pending post; caller commits this DB transaction.
 
@@ -106,14 +108,18 @@ async def enqueue_zernio_post(
         raise OutboundQueueError("برای پست، کپشن غیرخالی و حداکثر 2200 نویسه لازم است.")
     if media_type not in ("post", "carousel", "reel", "story"):
         raise OutboundQueueError("نوع محتوای قابل انتشار معتبر نیست.")
-    if origin not in ("telegram_photo", "telegram_test", "scheduled_post"):
+    if origin not in ("telegram_photo", "telegram_video", "telegram_album", "telegram_test", "scheduled_post"):
         raise OutboundQueueError("منبع درخواست معتبر نیست.")
     if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 180:
         raise OutboundQueueError("شناسه یکتای درخواست نامعتبر است.")
     # Same media contract as the provider adapter, checked before insertion.
     try:
-        _media_items(media_urls, media_type)
-    except ZernioPublishError as exc:
+        items = _media_items(media_urls, media_type)
+        safe_options = validate_instagram_options(
+            instagram_options, media_type=media_type,
+            media_kinds=[item["type"] for item in items],
+        )
+    except (ZernioPublishError, InstagramOptionError) as exc:
         raise OutboundQueueError(str(exc)) from exc
 
     payload = {
@@ -131,6 +137,8 @@ async def enqueue_zernio_post(
         payload["telegram_message_id"] = telegram_message_id
     if legacy_post_id is not None:
         payload["legacy_post_id"] = legacy_post_id
+    if safe_options:
+        payload["instagram_options"] = safe_options
 
     inserted = (await session.execute(text("""
         INSERT INTO public.outbound_queue
@@ -194,11 +202,15 @@ async def process_one_zernio_post() -> dict:
                 raise OutboundQueueError("مالکیت یا اتصال پیج تغییر کرده است؛ انتشار متوقف شد.")
             if not isinstance(caption, str) or (not caption.strip() and media_type != "story"):
                 raise OutboundQueueError("کپشن لازم است؛ انتشار متوقف شد.")
-            _media_items(urls, media_type)
+            items = _media_items(urls, media_type)
+            platform_options = validate_instagram_options(
+                payload.get("instagram_options"), media_type=media_type,
+                media_kinds=[item["type"] for item in items],
+            )
             publisher = get_zernio_publisher()
             if not publisher.configured:
                 raise OutboundQueueError("اتصال Zernio تنظیم نشده است؛ انتشار متوقف شد.")
-        except (KeyError, ValueError, TypeError, OutboundQueueError, ZernioPublishError) as exc:
+        except (KeyError, ValueError, TypeError, OutboundQueueError, ZernioPublishError, InstagramOptionError) as exc:
             reason = str(exc) if isinstance(exc, (OutboundQueueError, ZernioPublishError)) else "دادهٔ صف ناقص است؛ بررسی دستی لازم است."
             await _mark_failed(queue_id, reason)
             return {"claimed": 1, "published_requests": 0, "state": "failed"}
@@ -252,6 +264,7 @@ async def process_one_zernio_post() -> dict:
             media_urls=urls,
             media_type=media_type,
             idempotency_key=key,
+            platform_specific_data=platform_options,
         )
     except Exception as exc:  # noqa: BLE001
         if isinstance(exc, ZernioPublishError):

@@ -36,6 +36,17 @@ MAX_ACCOUNTS_PER_USER = settings.max_accounts_per_user          # 3 پیج به 
 ZERNIO_POST_DAILY_LIMIT = 3
 ZERNIO_POST_MIN_SPACING_SECONDS = 30 * 60
 
+# Private-admin Telegram → Zernio post drafts. A separate protected minute
+# job only assembles media and shows inline controls; it NEVER publishes.
+TELEGRAM_ALBUM_MAX_ITEMS = 10
+TELEGRAM_ALBUM_MIN_ITEMS = 2
+TELEGRAM_ALBUM_QUIET_SECONDS = 45
+TELEGRAM_ALBUM_DRAFTS_PER_TICK = 3
+TELEGRAM_DRAFT_EXPIRY_DAYS = 7
+TELEGRAM_BOT_DOWNLOAD_MAX_BYTES = 20 * 1024 * 1024
+TELEGRAM_POST_USER_TAG_LIMIT = 5
+TELEGRAM_POST_COLLABORATOR_LIMIT = 3
+
 REASON_USER_LIMIT = "user_limit"
 REASON_USER_TOTAL_LIMIT = "user_total_limit"
 REASON_TOTAL_LIMIT = "total_limit"

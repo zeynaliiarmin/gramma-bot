@@ -51,6 +51,19 @@ def build_scheduler() -> AsyncIOScheduler:
         max_instances=1,
         coalesce=True,
     )
+    # Local/polling fallback: the matching Vercel endpoint is scheduled by a
+    # separate Supabase cron in Production, not by this process. No Worker.
+    if settings.run_mode == "polling":
+        from app.bot.handlers.telegram_drafts import assemble_album_drafts_once
+        from app.bot.main import get_bot
+
+        async def _local_albums():
+            return await assemble_album_drafts_once(get_bot())
+
+        scheduler.add_job(
+            _run_async(_local_albums), "interval", seconds=60,
+            id="telegram_album_settings_only", max_instances=1, coalesce=True,
+        )
     scheduler.add_job(
         _run_async(refresh_all_due_tokens),
         "cron",

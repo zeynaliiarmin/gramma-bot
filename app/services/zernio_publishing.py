@@ -24,6 +24,7 @@ from zernio import (
 )
 
 from app.core.config import get_settings
+from app.services.instagram_options import InstagramOptionError, validate_instagram_options
 from app.utils import jalali
 
 logger = logging.getLogger("gramma.zernio")
@@ -344,6 +345,7 @@ class ZernioPublisher:
         media_urls: list[str],
         idempotency_key: str,
         media_type: str = "post",
+        platform_specific_data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Submit one real post for immediate publication, never a draft/mock.
 
@@ -358,6 +360,13 @@ class ZernioPublisher:
         if not isinstance(caption, str) or len(caption) > 2200 or (not caption.strip() and media_type != "story"):
             raise ZernioPublishError("برای پست/ریلز/کاروسل کپشن تا 2200 نویسه لازم است.")
         items = _media_items(media_urls, media_type)
+        try:
+            safe_options = validate_instagram_options(
+                platform_specific_data, media_type=media_type,
+                media_kinds=[item["type"] for item in items],
+            )
+        except InstagramOptionError as exc:
+            raise ZernioPublishError(str(exc)) from exc
         if not zernio_account_id or not normalize_username(expected_username):
             raise ZernioPublishError("اکانت Zernio نامعتبر است.", 403)
 
@@ -372,6 +381,8 @@ class ZernioPublisher:
         platform = {"platform": "instagram", "accountId": zernio_account_id}
         if media_type == "story":
             platform["platformSpecificData"] = {"contentType": "story"}
+        elif safe_options:
+            platform["platformSpecificData"] = safe_options
         try:
             async with self._client_factory() as client:
                 response = await client.posts.acreate(

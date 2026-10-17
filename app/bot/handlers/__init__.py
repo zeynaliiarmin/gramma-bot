@@ -10,6 +10,7 @@ from app.bot.handlers import (  # noqa: F401
     insights,
     navigation,
     outbound,
+    telegram_drafts,
     publish,
     schedule,
     search,
