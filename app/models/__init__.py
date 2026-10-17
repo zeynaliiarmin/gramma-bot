@@ -28,6 +28,10 @@ from app.models.telegram_draft import TelegramMediaIntent, TelegramPostDraft  # 
 from app.models.telegram_story import TelegramStorySequence, TelegramStorySlide  # noqa: F401
 from app.models.miniapp_publish import MiniappPublishDraft, MiniappPublishMedia  # noqa: F401
 from app.models.auto_messaging import ReplyTemplate, InboxMessage, AutoReplySlot  # noqa: F401
+from app.models.knowledge import (  # noqa: F401
+    BotSentLog, ManualReplyCandidate, PageStyleGuide, LLMModelCatalogue,
+    LLMModelBlacklist, KnowledgeSyncState,
+)
 
 __all__ = [
     "User",
@@ -59,4 +63,10 @@ __all__ = [
     "ReplyTemplate",
     "InboxMessage",
     "AutoReplySlot",
+    "BotSentLog",
+    "ManualReplyCandidate",
+    "PageStyleGuide",
+    "LLMModelCatalogue",
+    "LLMModelBlacklist",
+    "KnowledgeSyncState",
 ]

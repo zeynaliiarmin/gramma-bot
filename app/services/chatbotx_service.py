@@ -251,18 +251,46 @@ async def send_auto_reply_via_chatbotx(
     user_id: Optional[int] = None,
     account_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Send auto-reply via ChatbotX and log."""
+    """Legacy direct auto send; protect it with a pre-POST bot fingerprint.
+
+    The primary Worker uses its own atomic quota+intent transaction instead.
+    This unused compatibility helper cannot send without an exact page ID.
+    Manual Mini-App sends use another endpoint and are NOT bot sends.
+    """
+    from app.core.database import SessionLocal
+    from app.models import BotSentLog, InstagramAccount
+    from app.services.knowledge import content_hash
+
+    if not isinstance(account_id, int) or account_id < 1 or not reply_text or not conversation_id:
+        raise ChatbotXError("Auto reply needs a verified page and text", definitely_not_sent=True)
+    async with SessionLocal() as session:
+        account = await session.get(InstagramAccount, account_id)
+        if account is None or (user_id is not None and account.owner_id != user_id):
+            raise ChatbotXError("Auto reply page not authorized", definitely_not_sent=True)
+        intent = BotSentLog(account_id=account_id, provider="chatbotx", channel="dm",
+                            delivery_status="unknown", content_hash=content_hash(reply_text))
+        session.add(intent)
+        await session.commit()
+        intent_id = intent.id
     client = get_chatbotx_client()
     try:
         result = await client.send_message(conversation_id, reply_text)
-        await record_chatbotx_activity(
-            user_id, account_id, "chatbotx_send",
-            f"sent to {conversation_id}: {reply_text[:100]}", "info"
-        )
-        return result
-    except Exception as exc:
-        await record_chatbotx_activity(
-            user_id, account_id, "chatbotx_send_failed",
-            f"failed {conversation_id}: {exc}", "error"
-        )
+    except ChatbotXError as exc:
+        if exc.definitely_not_sent:
+            async with SessionLocal() as session:
+                known = await session.get(BotSentLog, intent_id)
+                if known:
+                    await session.delete(known)
+                    await session.commit()
+        # Ambiguous sends retain a durable log and are never replayed here.
         raise
+    async with SessionLocal() as session:
+        known = await session.get(BotSentLog, intent_id)
+        if known:
+            from app.services.messaging import _message_ids
+            known.provider_message_id, known.platform_message_id = _message_ids(result)
+            known.delivery_status = "sent"
+            await session.commit()
+    await record_chatbotx_activity(user_id, account_id, "chatbotx_send",
+                                   f"automatic send logged id={intent_id}", "info")
+    return result

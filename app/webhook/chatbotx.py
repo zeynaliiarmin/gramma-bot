@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Request, Response
 from sqlalchemy import func, select
@@ -112,8 +113,26 @@ def _extract_message(payload: dict) -> dict:
                          or comment.get("id") or message.get("comment_id"), 128)
     peer_id = _string(contact.get("instagram_scoped_user_id") or contact.get("ig_scoped_user_id")
                       or sender.get("instagram_scoped_user_id") or sender.get("ig_scoped_user_id"), 128)
+    recorded_at = datetime.now(timezone.utc)
+    stamp = message.get("createdAt") or message.get("created_at") or data.get("timestamp")
+    try:
+        if isinstance(stamp, str):
+            observed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        elif isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
+            observed = datetime.fromtimestamp(stamp / (1000 if stamp > 10**11 else 1), timezone.utc)
+        else:
+            observed = None
+        if observed and observed.tzinfo and (recorded_at - timedelta(days=30)) <= observed <= recorded_at:
+            recorded_at = observed
+    except (ValueError, OverflowError, OSError):
+        pass
+    # Only explicit, authenticated provider attribution may suppress our LLM.
+    automation_claimed = bool(data.get("automation_id") or data.get("automationId")
+                              or data.get("flow_id") or data.get("flowId")
+                              or metadata.get("automation_id") or metadata.get("flow_id"))
     return {
         "outgoing": False,
+        "received_at": recorded_at,
         "text": text.strip() if isinstance(text, str) else "",
         "conversation_id": conv_id,
         "contact_id": contact_id,
@@ -121,7 +140,8 @@ def _extract_message(payload: dict) -> dict:
         "type": kind,
         "channel_name": channel_name,
         "message_id": message_id,
-        "context": {"post_id": post_id, "comment_id": comment_id, "instagram_peer_id": peer_id},
+        "context": {"post_id": post_id, "comment_id": comment_id,
+                    "instagram_peer_id": peer_id, "automation_claimed": automation_claimed},
     }
 
 
@@ -188,6 +208,7 @@ async def _persist_inbound(payload: dict, message: dict, account: InstagramAccou
             parent_post_id=message["context"]["post_id"] or None,
             conversation_id=message["conversation_id"], contact_id=message["contact_id"],
             text=message["text"], context=message["context"], state=mode,
+            received_at=message["received_at"],
         )
         session.add(row)
         try:
@@ -212,6 +233,60 @@ async def _persist_inbound(payload: dict, message: dict, account: InstagramAccou
             return prior, False
 
 
+async def _stage_chatbotx_outgoing(payload: dict) -> None:
+    """Authenticated outgoing echo → untrusted owner-review candidate only.
+
+    This is a best-effort addition to Zernio's nightly native Instagram
+    history sweep. ChatbotX event fields/attribution vary: absence of a bot
+    log is NOT evidence an operator typed this message. No outbound call.
+    """
+    from app.services.knowledge import stage_candidate
+
+    data = _dict(payload.get("data")) or payload
+    message = _dict(data.get("message"))
+    channel = _dict(data.get("channel"))
+    platform = _string(channel.get("platform") or data.get("platform")
+                       or data.get("channel"), 24).lower()
+    if platform and platform != "instagram":
+        return
+    msg_id = _string(message.get("id") or data.get("message_id") or data.get("messageId"), 256)
+    conv_id = _string(data.get("conversation_id") or data.get("conversationId")
+                      or message.get("conversationId"), 256)
+    answer = message.get("text") or message.get("body") or message.get("content") or data.get("text")
+    if not msg_id or not conv_id or not isinstance(answer, str) or not answer.strip():
+        return
+    account = await _resolve_account(payload)
+    if account is None or normalize_username(account.username) != "zeynalikids":
+        return
+    timestamp = message.get("createdAt") or data.get("createdAt") or data.get("timestamp")
+    when = datetime.now(timezone.utc)
+    if isinstance(timestamp, str):
+        try:
+            candidate_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            if candidate_time.tzinfo and candidate_time <= when + timedelta(minutes=5):
+                when = candidate_time
+        except ValueError:
+            pass
+    async with SessionLocal() as session:
+        inbound = (await session.execute(select(InboxMessage).where(
+            InboxMessage.source == "chatbotx", InboxMessage.account_id == account.id,
+            InboxMessage.conversation_id == conv_id, InboxMessage.text.is_not(None),
+            InboxMessage.received_at >= when - timedelta(hours=24),
+            InboxMessage.received_at <= when,
+        ).order_by(InboxMessage.received_at.desc(), InboxMessage.id.desc()).limit(1))).scalar_one_or_none()
+        if inbound is None or not inbound.text:
+            return
+        kind = inbound.channel if inbound.channel in ("comment", "story_reply") else "dm"
+        native_id = message.get("platformMessageId") or message.get("instagram_message_id")
+        await stage_candidate(
+            session, account_id=account.id, source="chatbotx", message_id=msg_id,
+            channel=kind, question=inbound.text, answer=answer, created_at=when,
+            origin="unknown", platform_id=native_id if isinstance(native_id, str) else None,
+            peer_id=inbound.context.get("instagram_peer_id") if isinstance(inbound.context, dict) else None,
+        )
+        await session.commit()
+
+
 @router.post("/api/chatbotx-webhook")
 async def chatbotx_webhook(request: Request):
     raw = await request.body()
@@ -227,6 +302,12 @@ async def chatbotx_webhook(request: Request):
         return Response(status_code=400, content="bad json")
     message = _extract_message(payload)
     if message.get("outgoing"):
+        try:
+            await _stage_chatbotx_outgoing(payload)
+        except Exception as exc:  # noqa: BLE001
+            # Do not delay or retry an outgoing event because knowledge
+            # candidate staging is optional and can never trigger a send.
+            logger.warning("ChatbotX outgoing review staging failed: %s", type(exc).__name__)
         return {"ok": True, "ignored": "outgoing"}
     try:
         account = await _resolve_account(payload)

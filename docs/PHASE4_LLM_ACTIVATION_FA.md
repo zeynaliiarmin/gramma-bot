@@ -1,4 +1,6 @@
-# فاز ۴ — فعال‌سازی LLM و Worker پاسخ‌های خودکار
+# فاز ۴ — فعال‌سازی اولیهٔ LLM و Worker پاسخ‌های خودکار
+
+> این سند گزارشِ نسخهٔ اولیه است. سیاست کنونی Hold/مدلِ با قیمتِ صریحاً صفر/صف تأیید و لحن در `docs/PHASE4_KNOWLEDGE_HOLD_FA.md` آمده است؛ زمان بازیابی 5 دقیقه و مدل‌های ثابتِ زیر دیگر معتبر نیستند.
 
 - پروژهٔ مجاز: Vercel `miniapp` و Supabase `anpffdyooizfmqqouyvs`؛ مسیر عمومی: `https://miniapp-five-inky.vercel.app`.
 - متغیرهای Production (فقط سمت سرور): `MISTRAL_API_KEY`، `GEMINI_API_KEY`، `OPENROUTER_API_KEY`؛ مقادیر در این مخزن نگهداری نمی‌شوند. `AUTO_REPLY_WORKER_ENABLED=true` فقط برای Production اعمال شده است.

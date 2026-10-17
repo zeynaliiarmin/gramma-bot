@@ -8,6 +8,7 @@ import Calendar from './components/Calendar.jsx'
 import Collab from './components/Collab.jsx'
 import Automation from './components/Automation.jsx'
 import ReplyTemplates from './components/ReplyTemplates.jsx'
+import KnowledgeReview from './components/KnowledgeReview.jsx'
 import Settings from './components/Settings.jsx'
 import Safety from './components/Safety.jsx'
 import Integrations from './components/Integrations.jsx'
@@ -22,6 +23,7 @@ const TABS = [
   { id: 'collab', label: 'کلبریشن', icon: '🤝' },
   { id: 'automation', label: 'اتوماسیون', icon: '🤖' },
   { id: 'reply-templates', label: 'قالب‌ها', icon: '📝' },
+  { id: 'knowledge', label: 'تأیید پاسخ‌ها', icon: '🧠' },
   { id: 'safety', label: 'امنیت', icon: '🛡' },
   { id: 'integrations', label: 'اتصالات', icon: '🔗' },
 ]
@@ -154,6 +156,7 @@ export default function App() {
       {tab === 'collab' && <Collab />}
       {tab === 'automation' && <Automation />}
       {tab === 'reply-templates' && <ReplyTemplates />}
+      {tab === 'knowledge' && <KnowledgeReview />}
       {tab === 'safety' && <Safety />}
       {tab === 'integrations' && <Integrations />}
       {tab === 'settings' && <Settings />}

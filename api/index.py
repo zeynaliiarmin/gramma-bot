@@ -273,6 +273,7 @@ async def cron_trigger(job: str, request: Request):
       * telegram-albums           — assemble quiet albums and show settings (every 1 min; never publish)
       * process-comment-queue     — drain the legacy Meta comment queue (every 5 min)
       * auto-replies              — ChatbotX inbox worker (separate approved pg_cron)
+      * knowledge-sync            — read-only Instagram history sweep (nightly)
       * check-instagram-health    — probe connected pages (every 10 min)
       * reset-daily-counters      — reports today's counters (00:00)
       * daily-report              — 23:59 Tehran admin report + alerts
@@ -282,7 +283,7 @@ async def cron_trigger(job: str, request: Request):
     cron_secret = get_settings().cron_secret
     # Unlike legacy cron routes, BOTH protected jobs must NEVER run when
     # CRON_SECRET is missing. Neither accepts GET.
-    if job in ("outbound-post", "outbound-story", "telegram-albums", "auto-replies") and not cron_secret:
+    if job in ("outbound-post", "outbound-story", "telegram-albums", "auto-replies", "knowledge-sync") and not cron_secret:
         return Response(status_code=503, content="cron secret not configured")
     if cron_secret:
         provided = request.headers.get("X-Cron-Secret", "")
@@ -304,6 +305,18 @@ async def cron_trigger(job: str, request: Request):
         except Exception:  # noqa: BLE001
             logger.exception("auto-reply worker failed; uncertain sends are never replayed")
             return Response(status_code=500, content='{"ok":false,"retry_safe":false}')
+
+    if job == "knowledge-sync":
+        if request.method != "POST":
+            return Response(status_code=405, content="POST required")
+        from app.services.knowledge_sync import run_nightly_knowledge_sync
+
+        try:
+            result = await run_nightly_knowledge_sync()  # Zernio GET only
+            return {"ok": result["state"] == "ok", **result}
+        except Exception:  # noqa: BLE001
+            logger.exception("knowledge sync failed; no Instagram outbound attempted")
+            return Response(status_code=500, content='{"ok":false}')
 
     if job == "outbound-post":
         if request.method != "POST":

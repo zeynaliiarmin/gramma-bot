@@ -79,6 +79,9 @@ class InboxMessage(Base):
     sent_provider: Mapped[str | None] = mapped_column(String(16), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     ready_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    # Durable next-day LLM hold; separate from the temporary generation lease.
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    manual_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
 

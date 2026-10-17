@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 import httpx
@@ -30,6 +31,23 @@ class DeliveryOutcome:
     state: str  # sent | failed | unknown
     provider: str | None = None
     reason: str = ""
+    provider_message_id: str | None = None
+    platform_message_id: str | None = None
+
+
+def _message_ids(result: object) -> tuple[str | None, str | None]:
+    """Extract only explicitly returned IDs, never infer cross-provider IDs."""
+    if not isinstance(result, dict):
+        return None, None
+    data = result.get("data") or result.get("message") or result
+    if not isinstance(data, dict):
+        return None, None
+    message = data.get("message") if isinstance(data.get("message"), dict) else data
+    raw = message.get("id") or message.get("messageId") or message.get("_id")
+    native = message.get("platformMessageId") or message.get("instagram_message_id")
+    def valid(value):
+        return value[:256] if isinstance(value, str) and 1 <= len(value) <= 256 else None
+    return valid(raw), valid(native)
 
 
 class FallbackUnavailable(Exception):
@@ -147,7 +165,13 @@ async def _zernio_fallback(account: InstagramAccount, inbox: InboxMessage, text:
     except httpx.HTTPError:
         return DeliveryOutcome("unknown", reason="zernio_delivery_ambiguous")
     if 200 <= response.status_code < 300:
-        return DeliveryOutcome("sent", provider="zernio")
+        try:
+            returned = response.json()
+        except ValueError:
+            returned = {}
+        message_id, native_id = _message_ids(returned)
+        return DeliveryOutcome("sent", provider="zernio",
+                               provider_message_id=message_id, platform_message_id=native_id)
     if response.status_code in (400, 401, 403, 404, 422, 429):
         return DeliveryOutcome("failed", reason=f"zernio_http_{response.status_code}")
     # Even a 5xx can happen after the underlying Instagram action succeeded.
@@ -164,10 +188,17 @@ async def deliver_auto_reply(
     """
     if not text or not text.strip() or len(text) > 2000 or not account or not inbox.conversation_id:
         return DeliveryOutcome("failed", reason="invalid_auto_reply")
+    received = inbox.received_at or inbox.created_at
+    if received.tzinfo is None:
+        received = received.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) >= received + timedelta(hours=24) - timedelta(minutes=5):
+        return DeliveryOutcome("failed", reason="reply_window_expired")
     client = ChatbotXClient(timeout=8.0)
     try:
-        await client.send_message(inbox.conversation_id, text)
-        return DeliveryOutcome("sent", provider="chatbotx")
+        returned = await client.send_message(inbox.conversation_id, text)
+        message_id, native_id = _message_ids(returned)
+        return DeliveryOutcome("sent", provider="chatbotx",
+                               provider_message_id=message_id, platform_message_id=native_id)
     except ChatbotXError as exc:
         if not exc.definitely_not_sent:
             logger.warning("ChatbotX auto send ambiguous account=%s inbox=%s status=%s",
@@ -210,7 +241,7 @@ async def alert_admin(*, page: str, inbox_id: int, reason: str, ambiguous: bool 
     if reason == "page_not_identified":
         text = "⚠️ پیام بدون شناسه پیج دریافت شد و نیاز به بررسی دارد.\n"
     elif reason == "llm_unavailable":
-        text = "⚠️ سرویس‌های هوش مصنوعی موقتاً در دسترس نیستند؛ پیام در صف باقی ماند.\n"
+        text = "⚠️ مدلِ رایگانِ تأییدشده پاسخ نداد؛ پیام تا ساعت 13 روز بعد تهران در Hold است. اگر پنجرهٔ 24ساعته تمام شود فقط در مینی‌اپ بررسی می‌شود.\n"
     elif ambiguous:
         text = f"⚠️ وضعیت پیام داخلی {inbox_id} نامشخص است؛ لطفاً بررسی کن.\n"
     else:

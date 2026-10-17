@@ -65,8 +65,10 @@ from api.test_publish_real import router as manual_publish_router
 app.include_router(manual_publish_router)
 
 from app.webapp.reply_templates_api import router as reply_templates_router
+from app.webapp.knowledge_api import router as knowledge_router
 
 app.include_router(reply_templates_router)
+app.include_router(knowledge_router)
 
 # CORS: allow ONLY our own Mini-App origin(s). The Telegram WebApp always
 # originates from one of these configured URLs, so nothing else may call the
