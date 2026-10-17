@@ -6,7 +6,7 @@ API Channel and routes them through Gramma's automation engine:
   Instagram -> ChatbotX (API Channel) -> POST /api/chatbotx-webhook -> Gramma
     -> check auto_replies (Supabase)
     -> if match -> reply via ChatbotX API
-    -> else if AI enabled -> AvalAI reply via ChatbotX API
+    -> else if AI enabled -> LLM draft via ChatbotX API
     -> else -> log + optional admin notify
 
 Security:
@@ -232,7 +232,7 @@ async def _check_daily_limit(account: InstagramAccount) -> tuple[bool, int, int]
 
 
 async def _generate_ai_reply(text: str, account_id: Optional[int] = None, user_id: Optional[int] = None) -> Optional[str]:
-    """Generate a bounded AvalAI reply, with a safe offline fallback."""
+    """Generate a bounded provider-neutral reply, with a safe offline fallback."""
     try:
         from app.services.ai import draft_reply
 

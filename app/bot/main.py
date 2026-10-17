@@ -7,12 +7,15 @@ and future decoupled deployments can reuse it.
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
+from time import monotonic
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import TelegramObject
+from aiogram.types import CallbackQuery, TelegramObject
 
 from app.bot.handlers import (
     account,
@@ -40,6 +43,62 @@ logger = logging.getLogger("gramma.bot")
 _bot: Bot | None = None
 _dp: Dispatcher | None = None
 
+# An already acknowledged callback often gets answered again by a handler.
+# Avoid the redundant network call for empty answers without suppressing
+# meaningful success/error toasts. Bounded cache, per warm instance only.
+_ACKED: OrderedDict[str, float] = OrderedDict()
+_ORIGINAL_CALLBACK_ANSWER = CallbackQuery.answer
+
+
+def install_idempotent_callback_answer() -> None:
+    """Wrap aiogram once for webhook AND polling; never conceal real API errors."""
+    if getattr(CallbackQuery.answer, "_gramma_ack_wrapped", False):
+        return
+
+    async def answer_once(self, *args, **kwargs):  # noqa: ANN001
+        key = self.id
+        prior = _ACKED.get(key)
+        if prior is not None and monotonic() - prior < 120 and not (args[0] if args else kwargs.get("text")):
+            return True
+        try:
+            outcome = await _ORIGINAL_CALLBACK_ANSWER(self, *args, **kwargs)
+        except TelegramBadRequest as exc:
+            message = str(exc).lower()
+            if ("query is too old" in message or "query id is invalid" in message
+                    or (key in _ACKED and "already answered" in message)):
+                logger.warning("Telegram callback acknowledgement no longer accepted")
+                return False
+            raise
+        _ACKED[key] = monotonic()
+        _ACKED.move_to_end(key)
+        while len(_ACKED) > 4096:
+            _ACKED.popitem(last=False)
+        return outcome
+
+    answer_once._gramma_ack_wrapped = True  # type: ignore[attr-defined]
+    CallbackQuery.answer = answer_once  # type: ignore[method-assign]
+
+
+class AckFirstMiddleware:
+    """Acknowledge an inline button before any DB session or slow handler.
+
+    Warm instances can usually answer within a second. Cold starts and
+    Telegram/network round trips are beyond the handler's timing guarantee;
+    never offload durable state changes to an ephemeral Vercel BackgroundTask.
+    """
+
+    async def __call__(self, handler, event, data):  # noqa: ANN001
+        if isinstance(event, CallbackQuery):
+            started = monotonic()
+            try:
+                await event.answer()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("callback ACK failed before processing error=%s", type(exc).__name__)
+            elapsed = monotonic() - started
+            if elapsed >= 0.9:
+                logger.warning("callback ACK slow elapsed_ms=%d", round(elapsed * 1000))
+        return await handler(event, data)
+
 
 def get_bot() -> Bot:
     """Return the shared bot instance (used by background notifications)."""
@@ -58,6 +117,8 @@ def build_dispatcher() -> Dispatcher:
 
     dp = Dispatcher(storage=MemoryStorage(), fsm_strategy=FSMStrategy.USER_IN_CHAT)
     dp["settings"] = settings
+    install_idempotent_callback_answer()
+    dp.callback_query.outer_middleware(AckFirstMiddleware())
 
     # Middleware: ensure every callback/message opens a clean scoped DB
     # session (so access is always tracked) + friendly error guard.

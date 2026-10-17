@@ -9,7 +9,7 @@ import { api } from '../api.js'
  *   - حالت تطابق (کلمه کلیدی / هوش مصنوعی / همیشه)
  *   - گام‌ها: send (ارسال پیام) / wait (منتظر پاسخ بعدی) / collect (ثبت متغیر)
  *             goto (پرش) / end (پایان)
- *   - پاسخ هوشمند با AvalAI (سوییچ use_ai) + پیام جایگزین (fallback)
+ *   - پاسخ هوشمند با Gemini / OpenRouter / Mistral (سوییچ use_ai) + پیام جایگزین (fallback)
  *   - پیش‌نمایش زنده سناریو قبل از ذخیره
  *   - فعال/غیرفعال کردن سناریو و حذف
  */
@@ -238,7 +238,7 @@ export default function Automation() {
         </div>
         <p style={{ fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.9 }}>
           سناریوهای چندمرحله‌ای بسازید: کاربر «قیمت» بفرستد → ربات لیست قیمت را بفرستد →
-          کاربر انتخاب کند → سفارش ثبت شود. پاسخ‌ها می‌توانند با AvalAI هوشمند شوند.
+          کاربر انتخاب کند → سفارش ثبت شود. پاسخ‌ها می‌توانند با Gemini / OpenRouter / Mistral هوشمند شوند.
           اولویت: کلمات کلیدی بالاتر از هوش مصنوعی و «همیشه» است.
           <br />
           <b>معماری جدید:</b> اینستاگرام → ChatbotX API Channel → Gramma Webhook → بررسی قوانین (Supabase) → پاسخ via ChatbotX API
@@ -430,7 +430,7 @@ function Editor({ form, setForm, steps, setSteps, save, busy, close, preview, sa
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <input type="checkbox" checked={!!form.use_ai} onChange={(e) => patch('use_ai', e.target.checked)} />
-            <span style={{ fontSize: 12 }}>پاسخ هوشمند با AvalAI (در صورت در دسترس بودن)</span>
+            <span style={{ fontSize: 12 }}>پاسخ هوشمند با Gemini / OpenRouter / Mistral (در صورت در دسترس بودن)</span>
           </div>
 
           <input className="input" placeholder="پیام جایگزین (fallback) وقتی AI در دسترس نیست"

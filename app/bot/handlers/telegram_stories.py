@@ -159,17 +159,38 @@ async def receive_story_slide(message: Message) -> None:
                                              message.media_group_id, info["kind"])
         if reserved["action"] == "duplicate":
             return
+        # Tell the user we accepted the slide BEFORE the slower Telegram →
+        # Storage transfer. This is a progress receipt, NOT a queued Story.
+        receipt = None
+        try:
+            receipt = await message.answer("📥 اسلاید دریافت شد؛ در حال ذخیرهٔ امن رسانه هستم. هنوز به صف انتشار نرفته است.")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("story progress receipt deferred error=%s", type(exc).__name__)
         try:
             url = await save_telegram_post_media_to_supabase(message.bot, message, info)
         except Exception as exc:  # noqa: BLE001
             logger.warning("story storage failed seq=%s error=%s", reserved["sequence_id"], type(exc).__name__)
             await complete_story_slide(reserved["slide_id"], owner_id, chat_id,
                                        error="ذخیرهٔ این اسلاید ناموفق بود؛ آن را دوباره ارسال کنید.")
-            await message.answer("⚠️ ذخیرهٔ این اسلاید کامل نشد؛ به صف نمی‌رود. همان رسانه را با یک پیام تازه بفرستید.")
+            failure = "⚠️ ذخیرهٔ این اسلاید کامل نشد؛ به صف نمی‌رود. همان رسانه را با یک پیام تازه بفرستید."
+            if receipt:
+                try:
+                    await receipt.edit_text(failure)
+                    return
+                except Exception:  # noqa: BLE001
+                    pass
+            await message.answer(failure)
             return
         sequence = await complete_story_slide(reserved["slide_id"], owner_id, chat_id, url=url)
         if sequence["status"] == "collecting":
-            await message.answer(_progress_text(sequence), reply_markup=_buttons(sequence["id"]))
+            progress = _progress_text(sequence)
+            if receipt:
+                try:
+                    await receipt.edit_text(progress, reply_markup=_buttons(sequence["id"]))
+                    return
+                except Exception:  # noqa: BLE001
+                    pass
+            await message.answer(progress, reply_markup=_buttons(sequence["id"]))
     except SkipHandler:
         raise
     except StoryError as exc:

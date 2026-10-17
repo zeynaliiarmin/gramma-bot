@@ -66,7 +66,7 @@ async def cb_comments(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("comment:suggest:"))
 async def cb_comment_suggest(callback: CallbackQuery):
-    """Suggest a Persian comment reply using AvalAI or a safe template."""
+    """Suggest a Persian comment reply using the LLM adapter or a safe template."""
     from app.services.ai import draft_reply
 
     comment_id = callback.data.split(":", 2)[2]

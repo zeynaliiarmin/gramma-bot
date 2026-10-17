@@ -337,7 +337,7 @@ async def process_one_zernio_story() -> dict:
             path = payload.get("storage_paths")
             if (not isinstance(owner, int) or owner not in settings.admin_ids
                     or not isinstance(account_id, int) or payload.get("media_type") != "story"
-                    or payload.get("origin") != "telegram_story"
+                    or payload.get("origin") not in ("telegram_story", "miniapp_story")
                     or payload.get("story_released") is not True
                     or not isinstance(urls, list) or len(urls) != 1
                     or path != [owned_supabase_storage_path(urls[0])]

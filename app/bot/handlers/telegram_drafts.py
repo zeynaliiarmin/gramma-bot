@@ -156,7 +156,6 @@ def _panel_text(draft) -> str:
     rows.extend((
         "",
         "تنظیمات اختیاری:",
-        f"📍 لوکیشن: {html.escape(choices.get('locationId', '—'))}",
         "🤝 دعوت همکار (Collab): " + (
             ", ".join("@" + html.escape(name) for name in choices.get("collaborators", []))
             if choices.get("collaborators") else "—"),
@@ -188,8 +187,7 @@ def _panel_keyboard(draft, *, slides: bool = False) -> InlineKeyboardMarkup:
         rows.append([_button("◀️ تنظیمات", root + "back")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
     rows = [
-        [_button("📍 لوکیشن", root + "set:location"),
-         _button("🤝 دعوت همکار", root + "set:collaborators")],
+        [_button("🤝 دعوت همکار", root + "set:collaborators")],
         [_button("👤 تگ کاربر روی رسانه", root + ("slides" if draft.media_group_id is not None else "tag:0")),
          _button("✏️ ویرایش کپشن اصلی", root + "set:caption")],
     ]
@@ -202,7 +200,7 @@ def _panel_keyboard(draft, *, slides: bool = False) -> InlineKeyboardMarkup:
         else:
             rows.append([_button("📩 انتقال کپشن به اولین کامنت", root + "move")])
     choices = draft.options or {}
-    deletions = [("loc", "locationId", "لوکیشن"), ("tag", "userTags", "تگ‌ها"),
+    deletions = [("tag", "userTags", "تگ‌ها"),
                  ("collab", "collaborators", "همکارها")]
     for code, field, label in deletions:
         if choices.get(field):
@@ -228,9 +226,6 @@ def _prompt_text(draft, kind: str, slide: int | None = None) -> str:
                 "متن کوتاه را به همین پیام ریپلای کنید (حداکثر 150 نویسه). "
                 "پست در ابتدا بدون کپشن است؛ برای حذف متن کوتاهِ ثبت‌شده، "
                 "دکمهٔ «بدون کپشن روی پست» در تنظیمات را بزنید.")
-    if kind == "location":
-        return (header + "لوکیشن\nشناسهٔ عددی Facebook Page دارای موقعیت را به همین پیام ریپلای کنید؛ "
-                "نام مکان یا آدرس کار نمی‌کند. Zernio جستجوی مکان ارائه نکرده است.")
     if kind == "collaborators":
         return (header + "همکارها\nتا 3 نام کاربریِ عمومی Business/Creator را با فاصله یا ویرگول "
                 "به همین پیام ریپلای کنید؛ پذیرفتن دعوت به عهدهٔ صاحبان حساب است.")
@@ -529,7 +524,7 @@ async def draft_button(callback: CallbackQuery) -> None:
                                              callback.message.message_id, bits[3])
             await callback.message.edit_text(_panel_text(draft), reply_markup=_panel_keyboard(draft))
         elif ((action == "set" and len(bits) == 4 and bits[3] in
-               ("caption", "short_caption", "location", "collaborators"))
+               ("caption", "short_caption", "collaborators"))
               or (action == "tag" and len(bits) == 4 and bits[3].isdigit())):
             if action == "set":
                 kind, slide = bits[3], None

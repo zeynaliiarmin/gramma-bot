@@ -113,7 +113,7 @@ export default function Integrations() {
             {cbx.enabled ? (
               <>
                 پیج: <b>{cbx.username || '@zeynalikids'}</b> · Workspace: {cbx.workspace_id || '11706290428788736'}<br />
-                قابلیت: کامنت (1000/روز) · دایرکت (نامحدود) · استوری ریپلای · AI AvalAI<br />
+                قابلیت: کامنت (1000/روز) · دایرکت (نامحدود) · استوری ریپلای · AI Gemini / OpenRouter / Mistral<br />
                 آدرس: <a href="https://app.chatbotx.io" target="_blank" rel="noreferrer">app.chatbotx.io</a>
                 {cbx.error && <><br />⚠️ {cbx.error}</>}
               </>

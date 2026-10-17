@@ -1,7 +1,7 @@
-"""Gramma v3 — Tavily web search + AvalAI caption engine.
+"""Gramma v3 — Tavily web search + provider-neutral caption engine.
 
 `web_search` lets users research ideas (الهام محتوایی) right inside the bot,
-and `generate_caption` (app/services/ai.py) now uses AvalAI in production.
+and `generate_caption` (app/services/ai.py) uses the configured LLM priority.
 """
 
 from __future__ import annotations

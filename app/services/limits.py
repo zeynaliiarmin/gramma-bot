@@ -58,6 +58,15 @@ ZERNIO_STORY_MIN_SPACING_SECONDS = 5 * 60
 TELEGRAM_SCHEDULE_MAX_DAYS = 365
 TELEGRAM_SCHEDULE_MIN_LEAD_SECONDS = 5 * 60
 
+# Mini-App uses the SAME protected workers, post/tag caps and Story spacing.
+# Supabase Free Storage enforces a global maximum <=50 MB; do not promise
+# uploads up to the provider's higher video limit on this deployment.
+MINIAPP_POST_MAX_ITEMS = TELEGRAM_ALBUM_MAX_ITEMS
+MINIAPP_STORY_MAX_ITEMS = TELEGRAM_STORY_SEQUENCE_MAX_ITEMS
+MINIAPP_IMAGE_MAX_BYTES = TELEGRAM_STORY_IMAGE_MAX_BYTES
+MINIAPP_VIDEO_MAX_BYTES = 50 * 1024 * 1024
+MINIAPP_DIRECT_UPLOAD_THRESHOLD = 6 * 1024 * 1024
+
 REASON_USER_LIMIT = "user_limit"
 REASON_USER_TOTAL_LIMIT = "user_total_limit"
 REASON_TOTAL_LIMIT = "total_limit"

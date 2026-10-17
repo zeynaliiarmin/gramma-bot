@@ -73,7 +73,7 @@ async def cb_inbox(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("dm:suggest:"))
 async def cb_dm_suggest(callback: CallbackQuery):
-    """Suggest a Persian DM reply using AvalAI or the built-in fallback."""
+    """Suggest a Persian DM reply using the LLM adapter or built-in fallback."""
     from app.services.ai import draft_reply
 
     thread_id = callback.data.split(":", 2)[2]

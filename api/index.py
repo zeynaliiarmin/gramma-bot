@@ -140,9 +140,11 @@ from app.bot.handlers import (  # noqa: E402
     insights, navigation, outbound, telegram_stories, telegram_drafts, telegram_schedule_ui, publish, schedule, search, studio,
 )
 from app.bot.main import (  # noqa: E402
+    AckFirstMiddleware,
     DatabaseMiddleware,
     ErrorHandlerMiddleware,
     _fallback_router,
+    install_idempotent_callback_answer,
 )
 
 
@@ -161,6 +163,8 @@ def _detached_copy(router):
 def _build_webhook_dispatcher() -> Dispatcher:
     dp = Dispatcher(storage=MemoryStorage(), fsm_strategy=FSMStrategy.USER_IN_CHAT)
     dp["settings"] = settings
+    install_idempotent_callback_answer()
+    dp.callback_query.outer_middleware(AckFirstMiddleware())
     dp.callback_query.middleware(DatabaseMiddleware())
     dp.message.middleware(DatabaseMiddleware())
     dp.errors.middleware(ErrorHandlerMiddleware())
@@ -175,43 +179,6 @@ def _build_webhook_dispatcher() -> Dispatcher:
 
 
 _DISPATCHER = _build_webhook_dispatcher()
-
-# ── Idempotent-safe CallbackQuery.answer (module-level, webhook mode) ──
-# After the ack-first middleware answers a query, handlers may call
-# ``callback.answer(...)`` again; Telegram then returns an error which aiogram
-# would raise. Swallow that specific failure so no handler ever breaks.
-_orig_answer = CallbackQuery.answer
-
-
-async def _safe_answer(self, *args, **kwargs):  # noqa: ANN001
-    try:
-        return await _orig_answer(self, *args, **kwargs)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("callback.answer ignored (already acked/expired): %s", exc)
-        return True
-
-
-CallbackQuery.answer = _safe_answer  # type: ignore[method-assign]
-
-
-class AckFirstMiddleware:
-    """Acknowledge every callback_query BEFORE the handler runs.
-
-    The Telegram client keeps the button spinner until ``answerCallbackQuery``
-    arrives. Answering instantly (empty toast) makes the bot feel immediate
-    even while DB/AI work continues in the handler.
-    """
-
-    async def __call__(self, handler, event, data):  # noqa: ANN001
-        if isinstance(event, CallbackQuery):
-            try:
-                await event.answer()
-            except Exception:  # noqa: BLE001
-                pass
-        return await handler(event, data)
-
-
-_DISPATCHER.callback_query.outer_middleware(AckFirstMiddleware())
 
 
 @_tg_router.post(settings.telegram_webhook_path)
@@ -471,8 +438,8 @@ async def diag_env(request: Request):
     keys = [
         "TELEGRAM_BOT_TOKEN", "TELEGRAM_WEBHOOK_SECRET", "ADMIN_TELEGRAM_IDS",
         "MINIAPP_PUBLIC_URL", "DATABASE_URL", "SUPABASE_URL",
-        "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_ANON_KEY", "AVALAI_API_KEY",
-        "AVALAI_BASE_URL", "AVALAI_MODEL", "CHATBOTX_ENABLED", "CHATBOTX_BASE_URL",
+        "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_ANON_KEY",
+        "CHATBOTX_ENABLED", "CHATBOTX_BASE_URL",
         "CHATBOTX_WORKSPACE_ID", "CHATBOTX_WORKSPACE_TOKEN",
         "CHATBOTX_API_CHANNEL_TOKEN", "RUN_MODE", "CRON_SECRET", "VERCEL",
         "INSTAGRAM_ACCOUNT_MODE", "ENCRYPTION_KEY", "ZERNIO_API_KEY",

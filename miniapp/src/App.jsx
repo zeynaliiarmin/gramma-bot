@@ -11,9 +11,11 @@ import Settings from './components/Settings.jsx'
 import Safety from './components/Safety.jsx'
 import Integrations from './components/Integrations.jsx'
 import TelegramSchedulePicker from './components/TelegramSchedulePicker.jsx'
+import Composer from './components/Composer.jsx'
 
 const TABS = [
   { id: 'dashboard', label: 'داشبورد', icon: '📊' },
+  { id: 'composer', label: 'ساخت محتوا', icon: '✚' },
   { id: 'pages', label: 'پیج‌ها', icon: '🔗' },
   { id: 'calendar', label: 'تقویم', icon: '📅' },
   { id: 'collab', label: 'کلبریشن', icon: '🤝' },
@@ -144,6 +146,7 @@ export default function App() {
       </div>
 
       {tab === 'dashboard' && <Dashboard />}
+      {tab === 'composer' && <Composer me={me} />}
       {tab === 'pages' && <Pages />}
       {tab === 'calendar' && <Calendar />}
       {tab === 'collab' && <Collab />}

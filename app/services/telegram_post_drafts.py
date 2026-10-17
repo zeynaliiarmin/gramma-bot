@@ -503,7 +503,7 @@ async def attach_prompt(
     draft_id: int, owner_id: int, chat_id: int, panel_message_id: int,
     *, kind: str, slide: int | None, prompt_message_id: int,
 ) -> bool:
-    if kind not in ("caption", "location", "tag", "collaborators", "short_caption"):
+    if kind not in ("caption", "tag", "collaborators", "short_caption"):
         return False
     async with SessionLocal() as session:
         draft = (await session.execute(select(TelegramPostDraft).where(
@@ -558,8 +558,6 @@ async def apply_draft_reply(
             if len(raw) > TELEGRAM_SHORT_ON_POST_CAPTION_LIMIT:
                 raise TelegramDraftError(f"کپشن کوتاه روی پست باید حداکثر {TELEGRAM_SHORT_ON_POST_CAPTION_LIMIT} نویسه باشد.")
             draft.visible_caption = raw
-        elif kind == "location":
-            options["locationId"] = raw
         elif kind == "collaborators":
             names = [part for part in re.split(r"[,\s]+", raw) if part]
             if not 1 <= len(names) <= TELEGRAM_POST_COLLABORATOR_LIMIT:
@@ -665,7 +663,7 @@ async def change_caption_move(
 async def clear_draft_option(
     draft_id: int, owner_id: int, chat_id: int, panel_message_id: int, key: str,
 ) -> TelegramPostDraft:
-    field = {"loc": "locationId", "tag": "userTags", "collab": "collaborators"}.get(key)
+    field = {"tag": "userTags", "collab": "collaborators"}.get(key)
     if field is None:
         raise TelegramDraftError("تنظیمات انتخاب‌شده معتبر نیست.")
     async with SessionLocal() as session:
@@ -721,11 +719,12 @@ async def enqueue_confirmed_draft(
                 or any(not isinstance(item.get("url"), str) for item in media)):
             raise TelegramDraftError("تا رسانه‌ها و کپشن اصلی کامل نباشند، ورود به صف ممکن نیست.")
         options = dict(draft.options or {})
-        if not draft.caption_moved_to_comment and "firstComment" in options:
-            # An old separate-comment button may still be visible in Telegram;
-            # it must never leak a retired setting into a new queue request.
-            options.pop("firstComment")
-            draft.options = options
+        # Retired controls on older private draft panels cannot enter a new
+        # queue job, even if their prior value remains on the draft row.
+        options.pop("locationId", None)
+        if not draft.caption_moved_to_comment:
+            options.pop("firstComment", None)
+        draft.options = options
         caption_for_post = draft.caption
         if draft.caption_moved_to_comment:
             if (media_type not in ("post", "carousel")

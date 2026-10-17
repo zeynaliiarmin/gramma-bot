@@ -43,6 +43,11 @@ async def _block_if_referenced(queue_id: int, url: str) -> bool:
                  WHERE seq.status IN ('awaiting_count', 'collecting')
                    AND s.url = :url
             ) OR EXISTS (
+                SELECT 1 FROM public.miniapp_publish_media m
+                  JOIN public.miniapp_publish_drafts d ON d.id = m.draft_id
+                 WHERE m.url = :url AND d.status = 'collecting'
+                   AND d.expires_at > NOW()
+            ) OR EXISTS (
                 SELECT 1 FROM public.media m
                   JOIN public.posts p ON p.id = m.post_id
                  WHERE m.url = :url
@@ -97,7 +102,8 @@ async def cleanup_one_confirmed_media(action_type: str) -> dict:
              WHERE provider = 'zernio' AND action_type = :kind AND status = 'sent'
                AND payload->>'provider_status' = 'published'
                AND payload->>'origin' IN
-                   ('telegram_photo','telegram_video','telegram_album','telegram_story','scheduled_post')
+                   ('telegram_photo','telegram_video','telegram_album','telegram_story','scheduled_post',
+                    'miniapp','miniapp_story')
                AND payload->>'storage_cleanup_done' IS DISTINCT FROM 'true'
                AND payload->>'storage_cleanup_skipped' IS DISTINCT FROM 'true'
                AND (NOT (payload ? 'storage_cleanup_claimed_at') OR

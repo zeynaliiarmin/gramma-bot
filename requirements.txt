@@ -36,7 +36,6 @@ structlog>=24.1
 apscheduler>=3.10
 
 # ── Optional: OpenAI-compatible endpoint for AI captions ─────
-openai>=1.30
 
 # ── Optional: object storage (S3-compatible) as media CDN ────
 #     (Instagram requires publicly reachable media URLs)

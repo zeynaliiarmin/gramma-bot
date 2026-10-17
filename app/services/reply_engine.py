@@ -311,7 +311,7 @@ async def route_incoming_message(
     This is the brain for the new architecture:
       Instagram -> ChatbotX API Channel -> Gramma webhook -> this function
         -> check auto_replies -> if match, return reply
-        -> else if AI enabled, generate via AvalAI
+        -> else if AI enabled, generate via the configured LLM adapter
         -> else no reply
 
     Returns IncomingDecision with reply_text, source, etc.
@@ -339,8 +339,8 @@ async def route_incoming_message(
 
     # 2. Try AI if enabled
     ai_enabled = False
-    # AvalAI is the AI provider on both webhook and local runtimes.
-    if getattr(settings, "avalai_api_key", None):
+    # Only configured LLM providers can claim unmatched inbound messages.
+    if settings.llm_configured:
         ai_enabled = True
 
     if ai_enabled and text:

@@ -63,7 +63,7 @@ async def cb_dashboard(callback: CallbackQuery):
 
 @router.callback_query(F.data == "insights:ai")
 async def cb_ai_analysis(callback: CallbackQuery):
-    """AI page analytics & improvement suggestions via AvalAI."""
+    """AI page analytics through the configured LLM priority or offline fallback."""
     from app.services.insights import get_dashboard_snapshot
     from app.services.ai import analyze_page
 

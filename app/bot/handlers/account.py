@@ -287,7 +287,7 @@ async def _build_oauth_message(session, acc: InstagramAccount, message: Message,
             "• پاسخ خودکار کامنت‌ها (1000/روز)\n"
             "• پاسخ دایرکت (نامحدود)\n"
             "• ریپلای استوری\n"
-            "• اتصال به AvalAI/DeepSeek برای هوش مصنوعی\n\n"
+            "• پیشنهادهای AI با Gemini / OpenRouter رایگان / Mistral، در صورت تنظیم کلید\n\n"
             "📤 انتشار محتوا فقط از طریق Zernio و پیجِ مستقلِ متصل انجام می‌شود."
         )
         kb = InlineKeyboardMarkup(
@@ -447,7 +447,7 @@ async def cb_chatbotx_check(callback: CallbackQuery):
                 f"📱 پیج: {username}\n"
                 f"🔗 Workspace: {settings.chatbotx_workspace_id or '11706290428788736'}\n"
                 f"💬 کامنت/دایرکت/استوری: فعال\n"
-                f"🤖 AI: AvalAI DeepSeek متصل\n\n"
+                f"🤖 AI: {settings.llm_primary_provider}\n\n"
                 f"اکنون می‌توانید از تمام قابلیت‌های ربات استفاده کنید."
             )
         else:

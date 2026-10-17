@@ -14,6 +14,7 @@ import re
 from typing import AsyncIterator
 
 from app.core.config import get_settings
+from app.services.llm import generate_text
 
 settings = get_settings()
 
@@ -68,28 +69,9 @@ async def generate_caption(
 ) -> str:
     """Generate a caption.
 
-    Priority: AvalAI (direct) → built-in template.
-    Any failure degrades gracefully to the offline fallback.
+    Gemini Flash → OpenRouter :free → Mistral Free mode → offline template.
+    Nothing generated here is automatically sent to Instagram.
     """
-    # AvalAI / OpenAI-compatible direct
-    if settings.ai_api_key:
-        try:
-            return await _generate_caption_llm(prompt, tone, language, hashtags)
-        except Exception:
-            pass
-
-    # Offline template
-    return _generate_caption_template(prompt, tone, language, hashtags)
-
-
-async def _generate_caption_llm(prompt, tone, language, hashtags) -> str:
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(
-        api_key=settings.ai_api_key,
-        base_url=settings.ai_base_url or None,
-        timeout=25.0,
-    )
     system = (
         "You are a professional Instagram copywriter. Write a single, "
         "engaging caption for the given post topic. Return ONLY the caption "
@@ -98,15 +80,8 @@ async def _generate_caption_llm(prompt, tone, language, hashtags) -> str:
     )
     if hashtags:
         system += " Finish with 5-8 relevant hashtags."
-    resp = await client.chat.completions.create(
-        model=settings.ai_model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.85,
-    )
-    return resp.choices[0].message.content.strip()
+    result = await generate_text(system, prompt, temperature=0.85, timeout=12.0)
+    return result or _generate_caption_template(prompt, tone, language, hashtags)
 
 
 def _generate_caption_template(prompt, tone, language, hashtags) -> str:
@@ -141,35 +116,15 @@ def classify_dm(text: str, locale: str | None = None) -> str:
 async def classify_dm_async(text: str, locale: str | None = None) -> str:
     """Async classification with optional LLM refinement."""
     rule = classify_dm(text, locale)
-    if rule == "spam" or not settings.ai_api_key:
+    if rule == "spam" or not settings.llm_configured:
         return rule
-    try:
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(
-            api_key=settings.ai_api_key,
-            base_url=settings.ai_base_url or None,
-            timeout=12.0,
-        )
-        resp = await client.chat.completions.create(
-            model=settings.ai_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Classify the Instagram DM into exactly one of: "
-                        "spam, needs_reply, replied. Reply with the label only."
-                    ),
-                },
-                {"role": "user", "content": text[:1000]},
-            ],
-            temperature=0,
-        )
-        label = (resp.choices[0].message.content or "").strip().lower()
-        if label in {"spam", "needs_reply", "replied"}:
-            return label
-    except Exception:
-        pass
+    label = await generate_text(
+        "Classify the Instagram DM into exactly one of: spam, needs_reply, "
+        "replied. Reply with the label only.", text[:1000],
+        temperature=0, timeout=5.0, max_output_tokens=40,
+    )
+    if label and label.strip().lower() in {"spam", "needs_reply", "replied"}:
+        return label.strip().lower()
     return rule
 
 
@@ -178,70 +133,27 @@ async def draft_reply(
     locale: str | None = None,
     timeout: float = 20.0,
 ) -> str | None:
-    """Draft an AI reply to an incoming DM (AvalAI). Returns None on failure.
+    """Draft only; existing ChatbotX policy still controls actual replies.
 
-    ``timeout`` bounds the LLM call — the serverless webhook path passes a
-    short 5s budget so an incoming message can never hang the function.
+    The webhook passes a short budget; on provider failure the existing safe
+    offline reply remains available instead of blocking the webhook.
     """
-    if not settings.ai_api_key:
-        return _default_reply(incoming_text, locale)
-    try:
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(
-            api_key=settings.ai_api_key,
-            base_url=settings.ai_base_url or None,
-            timeout=timeout,
-        )
-        lang_hint = "Persian (فارسی)" if (locale or "").startswith("fa") else "English"
-        resp = await client.chat.completions.create(
-            model=settings.ai_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a social-media manager. Write ONE short, friendly "
-                        f"reply in {lang_hint} to the following message from a follower. "
-                        "Return only the reply text, no commentary."
-                    ),
-                },
-                {"role": "user", "content": incoming_text[:800]},
-            ],
-            temperature=0.7,
-        )
-        text = (resp.choices[0].message.content or "").strip()
-        return text or None
-    except Exception:  # noqa: BLE001
-        return _default_reply(incoming_text, locale)
+    lang_hint = "Persian (فارسی)" if (locale or "").startswith("fa") else "English"
+    result = await generate_text(
+        "You are a social-media manager. Write ONE short, friendly "
+        f"reply in {lang_hint} to a follower. Return only the reply text.",
+        incoming_text[:800], temperature=0.7, timeout=timeout,
+    )
+    return result or _default_reply(incoming_text, locale)
 
 
 async def _short_ai_task(system: str, prompt: str) -> str | None:
-    """Bounded AvalAI request for ideas and insights; never use a gateway."""
-    if not settings.ai_api_key:
-        return None
-    try:
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(
-            api_key=settings.ai_api_key,
-            base_url=settings.ai_base_url or None,
-            timeout=20.0,
-        )
-        response = await client.chat.completions.create(
-            model=settings.ai_model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt[:1800]},
-            ],
-            temperature=0.7,
-        )
-        return (response.choices[0].message.content or "").strip() or None
-    except Exception:  # noqa: BLE001
-        return None
+    """Bounded provider-neutral request for ideas and insights."""
+    return await generate_text(system, prompt[:1800], temperature=0.7, timeout=10.0)
 
 
 async def generate_post_ideas(topic: str, count: int = 5, language: str = "fa") -> str:
-    """Suggest post topics using AvalAI, with a useful offline fallback."""
+    """Suggest post topics through the configured LLM or the offline fallback."""
     count = max(1, min(count, 10))
     ideas = await _short_ai_task(
         f"Suggest exactly {count} distinct Instagram post ideas in {language}. "

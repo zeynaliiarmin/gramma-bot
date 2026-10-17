@@ -57,14 +57,14 @@ class Settings(BaseSettings):
     timezone: str = "Asia/Tehran"
     auto_refresh_margin_minutes: int = 2880  # 48h safety margin
 
-    # ── AI (AvalAI — production) / Tavily (web search) ────────
-    avalai_api_key: str = ""
-    avalai_base_url: str = "https://api.avalai.ir/v1"
-    avalai_model: str = "gpt-4o-mini"
-    # Legacy OpenAI-compatible knobs (kept for local swapping)
-    openai_api_key: str = ""
-    openai_model: str = "gpt-4o-mini"
-    openai_base_url: str = ""
+    # ── Text LLM priority: Gemini → OpenRouter free → Mistral Free mode ──
+    # No key is sent to a browser. Only explicitly configured providers run.
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
+    openrouter_api_key: str = ""
+    openrouter_model: str = "meta-llama/llama-3.2-3b-instruct:free"
+    mistral_api_key: str = ""
+    mistral_model: str = "mistral-small-latest"
     tavily_api_key: str = ""
 
     # ── ChatbotX (Instagram automation via Login with Instagram) ──
@@ -164,17 +164,18 @@ class Settings(BaseSettings):
         return self.instagram_account_mode == "simulation"
 
     @property
-    def ai_api_key(self) -> str:
-        """Preferred AI key: AvalAI first, then legacy OpenAI."""
-        return self.avalai_api_key or self.openai_api_key
+    def llm_configured(self) -> bool:
+        return bool(self.gemini_api_key or self.openrouter_api_key or self.mistral_api_key)
 
     @property
-    def ai_base_url(self) -> str:
-        return self.avalai_base_url if self.avalai_api_key else (self.openai_base_url or None)
-
-    @property
-    def ai_model(self) -> str:
-        return self.avalai_model or self.openai_model
+    def llm_primary_provider(self) -> str:
+        if self.gemini_api_key:
+            return "Gemini"
+        if self.openrouter_api_key:
+            return "OpenRouter (:free)"
+        if self.mistral_api_key:
+            return "Mistral"
+        return "آفلاین (بدون کلید)"
 
     @property
     def graph_base(self) -> str:

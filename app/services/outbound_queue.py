@@ -114,9 +114,9 @@ async def enqueue_zernio_post(
         raise OutboundQueueError("اتصال Zernio تنظیم نشده است؛ پستی در صف ثبت نشد.")
     if media_type not in ("post", "carousel", "reel"):
         raise OutboundQueueError("نوع محتوا برای صف پست معتبر نیست؛ استوری فقط از دنبالهٔ استوری صف می‌شود.")
-    if origin not in ("telegram_photo", "telegram_video", "telegram_album", "telegram_test", "scheduled_post"):
+    if origin not in ("telegram_photo", "telegram_video", "telegram_album", "telegram_test", "scheduled_post", "miniapp"):
         raise OutboundQueueError("منبع درخواست معتبر نیست.")
-    if caption_moved_to_comment and origin not in ("telegram_photo", "telegram_album"):
+    if caption_moved_to_comment and origin not in ("telegram_photo", "telegram_album", "miniapp"):
         raise OutboundQueueError("انتقال کپشن فقط برای پیش‌نویس تأییدشدهٔ عکس یا آلبوم مجاز است.")
     if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 180:
         raise OutboundQueueError("شناسه یکتای درخواست نامعتبر است.")
@@ -165,7 +165,7 @@ async def enqueue_zernio_post(
         payload["legacy_post_id"] = legacy_post_id
     if safe_options:
         payload["instagram_options"] = safe_options
-    if origin in ("telegram_photo", "telegram_video", "telegram_album"):
+    if origin in ("telegram_photo", "telegram_video", "telegram_album", "miniapp"):
         paths = [owned_supabase_storage_path(url) for url in media_urls]
         if any(path is None for path in paths):
             raise OutboundQueueError("رسانهٔ تلگرام در Storage پروژه پیدا نشد؛ صف‌گذاری متوقف شد.")
@@ -243,12 +243,17 @@ async def process_one_zernio_post() -> dict:
                     or normalize_username(account.username) != username):
                 raise OutboundQueueError("مالکیت یا اتصال پیج تغییر کرده است؛ انتشار متوقف شد.")
             items = _media_items(urls, media_type)
+            if payload.get("origin") == "miniapp":
+                owned_paths = [owned_supabase_storage_path(url) for url in urls]
+                if (any(path is None for path in owned_paths)
+                        or payload.get("storage_paths") != owned_paths):
+                    raise OutboundQueueError("رسانهٔ مینی‌اپ متعلق به Storage همین پروژه نیست؛ انتشار متوقف شد.")
             platform_options = validate_instagram_options(
                 payload.get("instagram_options"), media_type=media_type,
                 media_kinds=[item["type"] for item in items],
             )
             moved = payload.get("caption_moved_to_comment", False)
-            if moved and payload.get("origin") not in ("telegram_photo", "telegram_album"):
+            if moved and payload.get("origin") not in ("telegram_photo", "telegram_album", "miniapp"):
                 raise OutboundQueueError("منبع انتقال کپشن معتبر نیست؛ انتشار متوقف شد.")
             validate_instagram_caption(
                 caption, media_type=media_type, options=platform_options,

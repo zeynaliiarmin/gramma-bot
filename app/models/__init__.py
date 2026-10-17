@@ -26,6 +26,7 @@ from app.services.reply_limits import (  # noqa: F401
 from app.services.templates import PostTemplate  # noqa: F401
 from app.models.telegram_draft import TelegramMediaIntent, TelegramPostDraft  # noqa: F401
 from app.models.telegram_story import TelegramStorySequence, TelegramStorySlide  # noqa: F401
+from app.models.miniapp_publish import MiniappPublishDraft, MiniappPublishMedia  # noqa: F401
 
 __all__ = [
     "User",
@@ -52,4 +53,6 @@ __all__ = [
     "TelegramMediaIntent",
     "TelegramStorySequence",
     "TelegramStorySlide",
+    "MiniappPublishDraft",
+    "MiniappPublishMedia",
 ]

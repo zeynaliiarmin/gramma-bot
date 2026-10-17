@@ -211,6 +211,88 @@ async def api_accounts(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
     return {"accounts": await _account_dicts(ident.user_id)}
 
 
+# ── Admin-only Mini-App publishing composer ───────────────────
+# A browser never receives a Zernio key or Supabase service key. Only
+# /submit creates an outbound_queue row, never a direct provider POST.
+from app.services.miniapp_publish import (  # noqa: E402
+    ComposerError, active_draft, cancel_draft, complete_upload, create_draft,
+    get_draft, prepare_upload, save_settings, submit_draft,
+)
+
+
+def _composer_error(exc: ComposerError) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.get("/api/composer/active")
+async def composer_active(kind: str, ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
+    try:
+        return {"draft": await active_draft(ident.user_id, kind)}
+    except ComposerError as exc:
+        return _composer_error(exc)
+
+
+@app.post("/api/composer/drafts")
+async def composer_new(body: dict, ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
+    try:
+        return {"draft": await create_draft(ident.user_id, body.get("account_id"), body.get("kind"))}
+    except ComposerError as exc:
+        return _composer_error(exc)
+
+
+@app.get("/api/composer/drafts/{draft_id}")
+async def composer_get(draft_id: int, ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
+    try:
+        return {"draft": await get_draft(ident.user_id, draft_id)}
+    except ComposerError as exc:
+        return _composer_error(exc)
+
+
+@app.post("/api/composer/drafts/{draft_id}/settings")
+async def composer_save_settings(draft_id: int, body: dict,
+                                 ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
+    try:
+        return await save_settings(ident.user_id, draft_id, body)
+    except ComposerError as exc:
+        return _composer_error(exc)
+
+
+@app.post("/api/composer/drafts/{draft_id}/media/prepare")
+async def composer_prepare(draft_id: int, body: dict,
+                           ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
+    try:
+        return await prepare_upload(ident.user_id, draft_id, body)
+    except ComposerError as exc:
+        return _composer_error(exc)
+
+
+@app.post("/api/composer/drafts/{draft_id}/media/{media_id}/complete")
+async def composer_complete(draft_id: int, media_id: int,
+                            ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
+    try:
+        return {"media": await complete_upload(ident.user_id, draft_id, media_id)}
+    except ComposerError as exc:
+        return _composer_error(exc)
+
+
+@app.post("/api/composer/drafts/{draft_id}/submit")
+async def composer_submit(draft_id: int, body: dict,
+                          ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
+    try:
+        return await submit_draft(ident.user_id, draft_id, body)
+    except ComposerError as exc:
+        return _composer_error(exc)
+
+
+@app.post("/api/composer/drafts/{draft_id}/cancel")
+async def composer_cancel(draft_id: int,
+                          ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
+    try:
+        return await cancel_draft(ident.user_id, draft_id)
+    except ComposerError as exc:
+        return _composer_error(exc)
+
+
 @app.get("/api/dashboard")
 async def api_dashboard(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
     """Aggregated metrics across the user's pages + a weekly activity series."""

@@ -196,35 +196,21 @@ async def find_matching_scenario(
     return None
 
 
-# ── AI drafting (AvalAI → fallback text) ──────────────────────
+# ── AI drafting (provider-neutral → existing safe fallback text) ──
 async def draft_automation_reply(text: str, instruction: str, fallback: str) -> str:
-    """Draft a reply with AI; degrade gracefully to `fallback`."""
+    """Draft text only; existing automation decisions remain unchanged."""
     if not instruction.strip():
         return fallback or text
+    from app.services.llm import generate_text
+
     prompt = (
         f"{instruction.strip()}\n\n"
         f"پیام کاربر: «{text[:500]}»\n"
         "فقط متن پاسخ را بنویس (بدون توضیح)."
     )
-    try:
-        from openai import AsyncOpenAI  # AvalAI (OpenAI-compatible)
-
-        if settings.ai_api_key:
-            client = AsyncOpenAI(api_key=settings.ai_api_key, base_url=settings.ai_base_url or None, timeout=20.0)
-            resp = await client.chat.completions.create(
-                model=settings.ai_model,
-                messages=[
-                    {"role": "system", "content": "You are a Persian Instagram DM assistant."},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.7,
-            )
-            out = (resp.choices[0].message.content or "").strip()
-            if out:
-                return out
-    except Exception:  # noqa: BLE001
-        pass
-    return fallback or text
+    result = await generate_text("You are a Persian Instagram DM assistant.",
+                                 prompt, temperature=0.7, timeout=5.0)
+    return result or fallback or text
 
 
 def _apply_template(template: str, inbound_text: str, variables: dict) -> str:

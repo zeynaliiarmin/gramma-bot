@@ -30,7 +30,7 @@ from app.utils import jalali
 
 settings = get_settings()
 TEHRAN = ZoneInfo("Asia/Tehran")
-_ORIGINS = ("telegram_photo", "telegram_video", "telegram_album")
+_ORIGINS = ("telegram_photo", "telegram_video", "telegram_album", "miniapp")
 
 
 class ScheduleError(ValueError):
@@ -120,7 +120,7 @@ async def get_owned_scheduled_post(session, queue_id: int, owner_id: int,
           FROM public.outbound_queue
          WHERE id = :id AND provider = 'zernio' AND action_type = 'post'
            AND payload->>'owner_id' = :owner
-           AND payload->>'origin' IN ('telegram_photo','telegram_video','telegram_album')
+           AND payload->>'origin' IN ('telegram_photo','telegram_video','telegram_album','miniapp')
     """ + (" FOR UPDATE" if lock else ""))
     row = (await session.execute(statement, {"id": queue_id,
                                             "owner": str(owner_id)})).mappings().first()
@@ -137,7 +137,7 @@ async def list_scheduled_posts(owner_id: int, *, limit: int = 12, offset: int = 
              WHERE provider = 'zernio' AND action_type = 'post'
                AND status = 'pending' AND scheduled_for > NOW()
                AND payload->>'owner_id' = :owner
-               AND payload->>'origin' IN ('telegram_photo','telegram_video','telegram_album')
+               AND payload->>'origin' IN ('telegram_photo','telegram_video','telegram_album','miniapp')
              ORDER BY scheduled_for ASC, id ASC LIMIT :limit OFFSET :offset
         """), {"owner": str(owner_id), "limit": min(max(limit, 1), 40),
                "offset": max(offset, 0)})).mappings().all()
