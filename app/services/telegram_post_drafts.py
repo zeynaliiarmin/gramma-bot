@@ -143,7 +143,7 @@ async def set_pending_media_intent(owner_id: int, chat_id: int, mode: str) -> st
 
 
 async def clear_pending_media_intent(owner_id: int, chat_id: int) -> None:
-    """Navigation cancels only the waiting choice, never an existing draft."""
+    """Only an explicit Cancel button may remove a private waiting choice."""
     if owner_id != chat_id or owner_id not in settings.admin_ids:
         return
     async with SessionLocal() as session:
@@ -503,7 +503,7 @@ async def attach_prompt(
     draft_id: int, owner_id: int, chat_id: int, panel_message_id: int,
     *, kind: str, slide: int | None, prompt_message_id: int,
 ) -> bool:
-    if kind not in ("caption", "location", "tag", "collaborators", "first_comment", "short_caption"):
+    if kind not in ("caption", "location", "tag", "collaborators", "short_caption"):
         return False
     async with SessionLocal() as session:
         draft = (await session.execute(select(TelegramPostDraft).where(
@@ -513,8 +513,6 @@ async def attach_prompt(
         if draft.status != "ready" or draft.panel_message_id != panel_message_id:
             return False
         _live(draft)
-        if kind == "first_comment" and draft.caption_moved_to_comment:
-            return False
         if kind == "short_caption" and not draft.caption_moved_to_comment:
             return False
         draft.prompt_message_id = prompt_message_id
@@ -567,10 +565,6 @@ async def apply_draft_reply(
             if not 1 <= len(names) <= TELEGRAM_POST_COLLABORATOR_LIMIT:
                 raise TelegramDraftError("بین 1 تا 3 نام کاربری همکار وارد کنید.")
             options["collaborators"] = [instagram_username(name) for name in names]
-        elif kind == "first_comment":
-            if draft.caption_moved_to_comment:
-                raise TelegramDraftError("کپشن اصلی به اولین کامنت منتقل شده است؛ ابتدا انتقال را لغو کنید.")
-            options["firstComment"] = raw
         elif kind == "tag":
             name = instagram_username(raw)
             index = draft.prompt_slide
@@ -671,7 +665,7 @@ async def change_caption_move(
 async def clear_draft_option(
     draft_id: int, owner_id: int, chat_id: int, panel_message_id: int, key: str,
 ) -> TelegramPostDraft:
-    field = {"loc": "locationId", "tag": "userTags", "collab": "collaborators", "comment": "firstComment"}.get(key)
+    field = {"loc": "locationId", "tag": "userTags", "collab": "collaborators"}.get(key)
     if field is None:
         raise TelegramDraftError("تنظیمات انتخاب‌شده معتبر نیست.")
     async with SessionLocal() as session:
@@ -684,11 +678,6 @@ async def clear_draft_option(
             raise TelegramDraftError("این صفحه قدیمی است؛ پیش‌نویس تازه را باز کنید.")
         options = dict(draft.options or {})
         options.pop(field, None)
-        if field == "firstComment" and draft.caption_moved_to_comment:
-            # A stale clear-comment button must never leave an empty caption
-            # with no first comment. Treat it as restoring the original.
-            draft.caption_moved_to_comment = False
-            draft.visible_caption = None
         draft.options = validate_instagram_options(
             options, media_type=draft_media_type(draft), media_kinds=_media_kinds(draft),
         )
@@ -731,7 +720,12 @@ async def enqueue_confirmed_draft(
         if (not 0 < len(draft.caption.strip()) <= 2200
                 or any(not isinstance(item.get("url"), str) for item in media)):
             raise TelegramDraftError("تا رسانه‌ها و کپشن اصلی کامل نباشند، ورود به صف ممکن نیست.")
-        options = draft.options or {}
+        options = dict(draft.options or {})
+        if not draft.caption_moved_to_comment and "firstComment" in options:
+            # An old separate-comment button may still be visible in Telegram;
+            # it must never leak a retired setting into a new queue request.
+            options.pop("firstComment")
+            draft.options = options
         caption_for_post = draft.caption
         if draft.caption_moved_to_comment:
             if (media_type not in ("post", "carousel")
@@ -756,6 +750,7 @@ async def enqueue_confirmed_draft(
                 telegram_chat_id=chat_id,
                 telegram_message_id=media[0]["message_id"],
                 instagram_options=options,
+                scheduled_for=draft.scheduled_for,
             )
         except OutboundQueueError as exc:
             raise TelegramDraftError(str(exc)) from exc

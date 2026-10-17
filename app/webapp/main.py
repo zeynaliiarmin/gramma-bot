@@ -262,13 +262,124 @@ async def api_dashboard(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
 async def api_calendar(
     ident: MiniAppIdentity = Depends(resolve_miniapp_user),
 ):
+    from zoneinfo import ZoneInfo
+    from app.services.telegram_scheduling import list_scheduled_posts
+
     async with SessionLocal() as session:
         accounts = await get_accounts_for_user(session, ident.user_id)
         ids = [a.id for a in accounts]
-        if not ids:
-            return {"days": []}
-        days = await build_calendar(session, ident.user_id, ids)
-        return {"days": days}
+        days = await build_calendar(session, ident.user_id, ids) if ids else []
+    if ident.user_id in settings.admin_ids:
+        buckets = {day["date"]: day for day in days}
+        for job in await list_scheduled_posts(ident.user_id, limit=40):
+            jy, jm, jd = jalali.to_jalali(job["scheduled_for"])
+            key = f"{jy}-{jm:02d}-{jd:02d}"
+            if key not in buckets:
+                buckets[key] = {"date": key, "label": f"{jd} {jalali.FA_MONTHS[jm - 1]} {jy}",
+                                "weekday": jalali.weekday_fa(job["scheduled_for"]), "posts": []}
+            payload = job["payload"]
+            buckets[key]["posts"].append({
+                "id": job["id"], "queue_id": job["id"], "source": "telegram_zernio",
+                "kind": payload.get("media_type", "post"),
+                "caption": (payload.get("caption") or
+                            (payload.get("instagram_options") or {}).get("firstComment") or "")[:120],
+                "at": job["scheduled_for"].astimezone(ZoneInfo("Asia/Tehran")).strftime("%H:%M"),
+                "status": "scheduled", "when_jalali": jalali.to_jalali_str(job["scheduled_for"]),
+                "first_comment": (payload.get("instagram_options") or {}).get("firstComment") or "",
+                "moved": payload.get("caption_moved_to_comment") is True,
+                "visible_caption": payload.get("caption") or "",
+            })
+        days = [buckets[key] for key in sorted(buckets)]
+        for day in days:
+            day["posts"].sort(key=lambda post: post.get("at") or "")
+    return {"days": days}
+
+
+@app.get("/api/telegram-schedule/current")
+async def api_telegram_schedule_current(
+    target: str, item: int,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    """Read only: auth+ownership guard for this exact draft/queued Telegram post."""
+    from app.services.telegram_post_drafts import TelegramDraftError, get_owned_draft
+    from app.services.telegram_scheduling import get_owned_scheduled_post
+
+    if ident.user_id not in settings.admin_ids or item < 1:
+        return JSONResponse(status_code=403, content={"detail": "دسترسی ندارید."})
+    try:
+        if target == "draft":
+            draft = await get_owned_draft(item, ident.user_id, ident.user_id)
+            if draft.status != "ready":
+                return JSONResponse(status_code=409, content={"detail": "پیش‌نویس قابل زمان‌بندی نیست."})
+            chosen = draft.scheduled_for
+            caption = draft.visible_caption if draft.caption_moved_to_comment else draft.caption
+            kind = "پیش‌نویس پست"
+        elif target == "queue":
+            async with SessionLocal() as session:
+                job = await get_owned_scheduled_post(session, item, ident.user_id)
+            if not job or job["status"] != "pending":
+                return JSONResponse(status_code=409, content={"detail": "صف این پست قابل ویرایش نیست."})
+            chosen = job["scheduled_for"]
+            caption = job["payload"].get("caption")
+            kind = "پستِ در صف"
+        else:
+            return JSONResponse(status_code=400, content={"detail": "نوع زمان‌بندی نامعتبر است."})
+        return {"target": target, "item": item, "kind": kind,
+                "caption": (caption or "")[:120],
+                "scheduled_jalali": jalali.to_jalali_str(chosen) if chosen else None}
+    except TelegramDraftError:
+        return JSONResponse(status_code=403, content={"detail": "این پیش‌نویس متعلق به شما نیست."})
+
+
+@app.post("/api/telegram-schedule/choose")
+async def api_telegram_schedule_choose(
+    body: dict, ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    """Save Tehran/Jalali selection; NEVER insert a queue job or publish."""
+    from app.services.telegram_post_drafts import TelegramDraftError
+    from app.services.telegram_scheduling import (
+        ScheduleError, jalali_choice, set_draft_schedule, set_queue_schedule,
+    )
+
+    if ident.user_id not in settings.admin_ids:
+        return JSONResponse(status_code=403, content={"detail": "فقط مدیر مجاز است."})
+    target, item = body.get("target"), body.get("item")
+    fields = [body.get(name) for name in ("year", "month", "day", "hour", "minute")]
+    if target not in ("draft", "queue") or type(item) is not int or item < 1 or any(type(v) is not int for v in fields):
+        return JSONResponse(status_code=400, content={"detail": "تاریخ یا پیش‌نویس معتبر نیست."})
+    try:
+        when = jalali_choice(*fields)
+        if target == "draft":
+            saved = await set_draft_schedule(item, ident.user_id, when)
+        else:
+            saved = await set_queue_schedule(item, ident.user_id, when)
+        return {"ok": True, "scheduled_jalali": saved["jalali"],
+                "queued": target == "queue",
+                "message": ("زمان صفِ موجود تغییر کرد؛ پست تازه‌ای ساخته نشد."
+                            if target == "queue" else
+                            "زمان در پیش‌نویس ذخیره شد؛ برای صف‌گذاری به تلگرام برگردید و «تأیید نهایی» را بزنید.")}
+    except (ScheduleError, TelegramDraftError) as exc:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.post("/api/telegram-schedule/edit-caption")
+async def api_telegram_schedule_caption(
+    body: dict, ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    """Edit ONLY a pending owned Telegram queue row; no provider call."""
+    from app.services.telegram_scheduling import ScheduleError, update_queue_caption
+
+    if ident.user_id not in settings.admin_ids:
+        return JSONResponse(status_code=403, content={"detail": "فقط مدیر مجاز است."})
+    item, kind, value = body.get("item"), body.get("kind"), body.get("value")
+    if (type(item) is not int or item < 1 or kind not in ("caption", "visible", "comment")
+            or not isinstance(value, str) or len(value) > 2200):
+        return JSONResponse(status_code=400, content={"detail": "متن کپشن یا شناسهٔ صف معتبر نیست."})
+    try:
+        saved = await update_queue_caption(item, ident.user_id, kind=kind, value=value)
+        return {"ok": True, "scheduled_jalali": saved["jalali"]}
+    except ScheduleError as exc:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
 @app.get("/api/scheduled")

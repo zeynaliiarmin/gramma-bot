@@ -9,13 +9,14 @@ from __future__ import annotations
 import html
 import logging
 import re
+from urllib.parse import urlencode
 
 from aiogram import F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
-    CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message,
+    CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo,
 )
 
 from app.bot.states import MediaWait
@@ -33,6 +34,7 @@ from app.services.telegram_post_drafts import (
     change_caption_move,
     claim_one_draft_notice,
     clear_draft_option,
+    clear_pending_media_intent,
     complete_telegram_media,
     draft_media_type,
     enqueue_confirmed_draft,
@@ -47,6 +49,9 @@ from app.services.telegram_post_drafts import (
     set_pending_media_intent,
 )
 from app.services.limits import TELEGRAM_ALBUM_DRAFTS_PER_TICK
+from app.services.telegram_scheduling import ScheduleError, quick_choice, set_draft_schedule
+from app.utils import jalali
+from app.webapp.auth import make_miniapp_ticket
 
 router = Router(name="telegram_media_drafts")
 logger = logging.getLogger("gramma.telegram_drafts")
@@ -75,6 +80,11 @@ async def wait_for_admin_media(callback: CallbackQuery, state: FSMContext) -> No
         await callback.answer("این گزینه فقط در چت خصوصی مدیر فعال است.")
         return
     await callback.answer()
+    from app.services.telegram_story_sequences import active_story
+
+    if await active_story(callback.from_user.id, callback.message.chat.id):
+        await callback.message.answer("⚠️ یک دنبالهٔ استوری در جریان است؛ ابتدا «پایان و صف» یا «لغو استوری» را بزنید. /start آن را لغو نمی‌کند.")
+        return
     mode = "post" if (callback.data or "") in {
         "publish:wait:post", "publish:new:post", "publish:new:photo", "publish:new:carousel",
     } else "reel"
@@ -82,9 +92,8 @@ async def wait_for_admin_media(callback: CallbackQuery, state: FSMContext) -> No
         page = await set_pending_media_intent(
             callback.from_user.id, callback.message.chat.id, mode,
         )
-        # An explicit NEW publication selection cancels any earlier, legacy
-        # in-memory dialog. Draft settings and notifications never touch FSM.
-        await state.clear()
+        # The explicit waiting choice is durable; neither this selection nor
+        # /start/navigation silently cancels another unfinished draft/FSM.
         prompt = ("لطفاً عکس یا ویدیوی خود را ارسال کنید" if mode == "post"
                   else "لطفاً ویدیوی عمودی خود را ارسال کنید")
         text_value = f"{prompt}\n🎯 پیج: @{html.escape(page)}\nرسانه ابتدا به تنظیمات می‌رود؛ فقط تأیید نهایی آن را به صف می‌افزاید."
@@ -92,14 +101,31 @@ async def wait_for_admin_media(callback: CallbackQuery, state: FSMContext) -> No
             text_value += ("\nویدیوی تکی در مسیر فعلی Zernio به شکل ریلز با نمایش در فید "
                            "ارسال می‌شود؛ نوع دقیق در تنظیمات نشان داده می‌شود.")
         try:
-            await callback.message.edit_text(text_value)
+            await callback.message.edit_text(text_value, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [_button("🗑 لغو", "publish:wait:cancel")],
+            ]))
         except Exception:  # noqa: BLE001
-            await callback.message.answer(text_value)
+            await callback.message.answer(text_value, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [_button("🗑 لغو", "publish:wait:cancel")],
+            ]))
     except TelegramDraftError as exc:
         await callback.message.answer("⚠️ " + html.escape(str(exc)))
     except Exception as exc:  # noqa: BLE001
         logger.warning("media intent selection uncertain error=%s", type(exc).__name__)
         await callback.message.answer("⚠️ ثبت حالت انتظار قطعی نشد؛ دوباره روی دکمهٔ پست یا ریلز بزنید.")
+
+
+@router.callback_query(F.data == "publish:wait:cancel")
+async def cancel_waiting_media(callback: CallbackQuery) -> None:
+    if (not callback.from_user or not isinstance(callback.message, Message)
+            or not _admin_private(callback.from_user.id, callback.message.chat)):
+        await callback.answer("دسترسی ندارید.")
+        return
+    await callback.answer()
+    mode = await get_pending_media_intent(callback.from_user.id, callback.message.chat.id)
+    if mode:
+        await clear_pending_media_intent(callback.from_user.id, callback.message.chat.id)
+    await callback.message.edit_text("🗑 حالت انتظار رسانه با دکمهٔ لغو بسته شد؛ پیش‌نویس‌های دیگر محفوظ‌اند.")
 
 
 def _panel_text(draft) -> str:
@@ -140,9 +166,15 @@ def _panel_text(draft) -> str:
         ", ".join((f"اسلاید {tag['mediaIndex'] + 1}: " if "mediaIndex" in tag else "")
                   + "@" + html.escape(tag["username"]) for tag in tags)
         if tags else "—"))
-    if media_type in ("post", "carousel"):
+    if draft.caption_moved_to_comment:
         comment = choices.get("firstComment") or "—"
-        rows.append(f"💬 اولین کامنت: {html.escape(comment[:150])}{'…' if len(comment) > 150 else ''}")
+        rows.append(f"💬 اولین کامنت (از کپشن اصلی): {html.escape(comment[:150])}{'…' if len(comment) > 150 else ''}")
+    if draft.scheduled_for:
+        rows.append("⏰ انتشار زمان‌بندی‌شده (تهران، شمسی): "
+                    + html.escape(jalali.to_jalali_str(draft.scheduled_for)))
+        rows.append("پردازشگر پست هر 5 دقیقه صف را بررسی می‌کند؛ ساعت دقیق انتشار ممکن است کمی دیرتر باشد.")
+    else:
+        rows.append("⏰ زمان‌بندی: انتخاب نشده؛ پس از تأیید، نوبت بعدی صف.")
     rows.extend(("", "فقط دکمهٔ «تأیید نهایی؛ افزودن به صف» درخواست را ثبت می‌کند؛ انتشار واقعی بعداً و طبق محدودیت‌ها انجام می‌شود."))
     return "\n".join(rows)
 
@@ -169,16 +201,14 @@ def _panel_keyboard(draft, *, slides: bool = False) -> InlineKeyboardMarkup:
             rows.append([_button("↩️ بازگرداندن کپشن به پست", root + "clear:move")])
         else:
             rows.append([_button("📩 انتقال کپشن به اولین کامنت", root + "move")])
-            rows.append([_button("💬 اولین کامنت جداگانه", root + "set:first_comment")])
     choices = draft.options or {}
     deletions = [("loc", "locationId", "لوکیشن"), ("tag", "userTags", "تگ‌ها"),
                  ("collab", "collaborators", "همکارها")]
-    if not draft.caption_moved_to_comment:
-        deletions.append(("comment", "firstComment", "کامنت جداگانه"))
     for code, field, label in deletions:
         if choices.get(field):
             rows.append([_button(f"❌ حذف {label}", root + "clear:" + code)])
     rows.append([_button("🚀 تأیید نهایی؛ افزودن به صف", root + "send")])
+    rows.append([_button("⏰ زمان‌بندی انتشار", root + "schedule")])
     rows.append([_button("🗑 لغو پیش‌نویس", root + "cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -204,8 +234,6 @@ def _prompt_text(draft, kind: str, slide: int | None = None) -> str:
     if kind == "collaborators":
         return (header + "همکارها\nتا 3 نام کاربریِ عمومی Business/Creator را با فاصله یا ویرگول "
                 "به همین پیام ریپلای کنید؛ پذیرفتن دعوت به عهدهٔ صاحبان حساب است.")
-    if kind == "first_comment":
-        return header + "اولین کامنت\nمتن کامنت را به همین پیام ریپلای کنید (حداکثر 2200 نویسه)."
     if kind == "tag" and slide is not None:
         media = ordered_media(draft)[slide]
         suffix = ("مختصات تگ روی این عکس به‌صورت مرکزی (0.5, 0.5) ثبت می‌شود."
@@ -444,6 +472,43 @@ async def draft_button(callback: CallbackQuery) -> None:
             await cancel_draft(draft_id, callback.from_user.id, callback.message.chat.id,
                                callback.message.message_id)
             await callback.message.edit_text("🗑 پیش‌نویس لغو شد؛ هیچ پستی به صف نرفت.")
+        elif action == "schedule" and len(bits) == 3:
+            await callback.message.edit_text(
+                _panel_text(draft) + "\n\n⏰ یکی از 4 گزینهٔ زمان‌بندی را انتخاب کنید؛ انتخاب زمان هنوز چیزی را صف نمی‌کند.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [_button("1 ساعت بعد", f"td:{draft_id}:when:1h")],
+                    [_button("3 ساعت بعد", f"td:{draft_id}:when:3h")],
+                    [_button("فردا صبح (ساعت 9)", f"td:{draft_id}:when:tomorrow")],
+                    [_button("زمان دلخواه (Custom)", f"td:{draft_id}:when:custom")],
+                    [_button("◀️ تنظیمات", f"td:{draft_id}:back")],
+                ]),
+            )
+        elif action == "when" and len(bits) == 4 and bits[3] in ("1h", "3h", "tomorrow"):
+            await set_draft_schedule(
+                draft_id, callback.from_user.id, quick_choice(bits[3]),
+                panel_message_id=callback.message.message_id,
+            )
+            updated = await get_owned_draft(draft_id, callback.from_user.id, callback.message.chat.id)
+            await callback.message.edit_text(_panel_text(updated), reply_markup=_panel_keyboard(updated))
+        elif action == "when" and len(bits) == 4 and bits[3] == "custom":
+            buttons = []
+            if settings.miniapp_url:
+                ticket = make_miniapp_ticket(callback.from_user.id, ttl_seconds=15 * 60)
+                url = settings.miniapp_url.rstrip("/") + "/?" + urlencode({
+                    "_token": ticket, "schedule": "draft", "item": draft_id,
+                })
+                buttons.append([InlineKeyboardButton(text="🗓 تقویم شمسی گرافیکی (مینی‌اپ)",
+                                                     web_app=WebAppInfo(url=url))])
+            buttons.extend([
+                [_button("🔘 تقویم دکمه‌ای تلگرام", f"tcal:d:{draft_id}:m")],
+                [_button("◀️ تنظیمات (بازخوانی زمان)", f"td:{draft_id}:back")],
+            ])
+            await callback.message.edit_text(
+                "🗓 زمان دلخواه را با تاریخ شمسی و ساعت تهران انتخاب کنید. "
+                "پس از ثبت در مینی‌اپ، به این چت برگردید و «بازخوانی زمان» را بزنید. "
+                "ورود به صف فقط با «تأیید نهایی» در تنظیمات انجام می‌شود.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+            )
         elif action == "slides" and len(bits) == 3 and draft.media_group_id is not None:
             await callback.message.edit_text(_panel_text(draft) + "\n\nاسلاید تگ را انتخاب کنید:",
                                              reply_markup=_panel_keyboard(draft, slides=True))
@@ -464,14 +529,10 @@ async def draft_button(callback: CallbackQuery) -> None:
                                              callback.message.message_id, bits[3])
             await callback.message.edit_text(_panel_text(draft), reply_markup=_panel_keyboard(draft))
         elif ((action == "set" and len(bits) == 4 and bits[3] in
-               ("caption", "short_caption", "location", "collaborators", "first_comment"))
+               ("caption", "short_caption", "location", "collaborators"))
               or (action == "tag" and len(bits) == 4 and bits[3].isdigit())):
             if action == "set":
                 kind, slide = bits[3], None
-                if kind == "first_comment" and (
-                    draft_media_type(draft) == "reel" or draft.caption_moved_to_comment
-                ):
-                    raise TelegramDraftError("اولین کامنت جداگانه در این حالت مجاز نیست؛ در حالت انتقال، کپشن اصلی همان کامنت است.")
                 if kind == "short_caption" and not draft.caption_moved_to_comment:
                     raise TelegramDraftError("ابتدا کپشن اصلی را به اولین کامنت منتقل کنید.")
             else:
@@ -489,7 +550,7 @@ async def draft_button(callback: CallbackQuery) -> None:
                 await callback.message.answer("این صفحه در همین فاصله قدیمی شد؛ به پیام راهنمای تازه پاسخ ندهید.")
         else:
             raise TelegramDraftError("دکمه معتبر یا مربوط به این رسانه نیست.")
-    except TelegramDraftError as exc:
+    except (TelegramDraftError, ScheduleError) as exc:
         await callback.message.answer("⚠️ " + html.escape(str(exc)))
     except Exception as exc:  # noqa: BLE001
         logger.warning("draft callback uncertain id=%s error=%s", draft_id, type(exc).__name__)

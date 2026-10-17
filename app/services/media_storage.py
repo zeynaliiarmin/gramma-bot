@@ -8,9 +8,11 @@ an S3-compatible bucket and use S3_PUBLIC_BASE as the public prefix.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from aiogram import Bot
 from aiogram.types import Message
@@ -100,6 +102,56 @@ async def upload_to_supabase_storage(local_path: Path, ext: str) -> str:
             # Never log a remote response body (could contain credentials).
             raise RuntimeError(f"storage upload failed ({resp.status_code})")
     return f"{settings.supabase_url.rstrip('/')}/storage/v1/object/public/{bucket}/{key}"
+
+
+def owned_supabase_storage_path(url: str) -> str | None:
+    """Recognize ONLY this project's bot-created, unique Supabase objects.
+
+    An external URL, a copied path, a query string or a different bucket can
+    never authorize a Storage DELETE. The UUID key is generated above, server
+    side; neither a user-supplied URL nor another application's file matches.
+    """
+    if not isinstance(url, str) or not settings.supabase_url:
+        return None
+    bucket = settings.supabase_storage_bucket
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", bucket or ""):
+        return None
+    base = urlsplit(settings.supabase_url.rstrip("/"))
+    candidate = urlsplit(url)
+    prefix = base.path.rstrip("/") + f"/storage/v1/object/public/{bucket}/"
+    if (base.scheme != "https" or candidate.scheme != "https"
+            or base.netloc != candidate.netloc or candidate.query or candidate.fragment
+            or not candidate.path.startswith(prefix)):
+        return None
+    path = candidate.path[len(prefix):]
+    if not re.fullmatch(r"gramma/[0-9a-f]{32}\.(?:jpg|jpeg|png|mp4|mov)", path):
+        return None
+    return path
+
+
+async def delete_owned_supabase_media(path: str) -> bool:
+    """Remove one confirmed-published bot object via Storage API, not SQL.
+
+    HTTP 404 is idempotent success (already removed); other errors remain
+    pending for a later read-only-status-confirmed cleanup pass.
+    """
+    import httpx
+
+    if (not isinstance(path, str) or not re.fullmatch(
+            r"gramma/[0-9a-f]{32}\.(?:jpg|jpeg|png|mp4|mov)", path)
+            or not settings.supabase_url or not settings.supabase_service_role_key):
+        return False
+    bucket = settings.supabase_storage_bucket
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", bucket or ""):
+        return False
+    url = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/{bucket}/{path}"
+    headers = {
+        "Authorization": f"Bearer {settings.supabase_service_role_key}",
+        "apikey": settings.supabase_service_role_key,
+    }
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.delete(url, headers=headers)
+    return response.status_code in (200, 204, 404)
 
 
 async def save_telegram_photo_to_supabase(bot: Bot, message: Message) -> str:

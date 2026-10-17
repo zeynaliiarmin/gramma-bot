@@ -22,7 +22,11 @@ from app.models import ActivityLog, InstagramAccount, Post
 from app.services.instagram_options import (
     InstagramOptionError, validate_instagram_caption, validate_instagram_options,
 )
-from app.services.limits import ZERNIO_POST_DAILY_LIMIT, ZERNIO_POST_MIN_SPACING_SECONDS
+from app.services.limits import (
+    ZERNIO_POST_DAILY_LIMIT, ZERNIO_POST_MIN_SPACING_SECONDS,
+    TELEGRAM_SCHEDULE_MAX_DAYS, TELEGRAM_SCHEDULE_MIN_LEAD_SECONDS,
+)
+from app.services.media_storage import owned_supabase_storage_path
 from app.services.zernio_publishing import (
     ZernioPublishError,
     _media_items,
@@ -92,6 +96,7 @@ async def enqueue_zernio_post(
     legacy_post_id: int | None = None,
     instagram_options: dict | None = None,
     caption_moved_to_comment: bool = False,
+    scheduled_for: datetime | None = None,
 ) -> dict:
     """Insert exactly one pending post; caller commits this DB transaction.
 
@@ -107,8 +112,8 @@ async def enqueue_zernio_post(
         raise OutboundQueueError("نام کاربری پیج متصل معتبر نیست.")
     if not settings.zernio_api_key:
         raise OutboundQueueError("اتصال Zernio تنظیم نشده است؛ پستی در صف ثبت نشد.")
-    if media_type not in ("post", "carousel", "reel", "story"):
-        raise OutboundQueueError("نوع محتوای قابل انتشار معتبر نیست.")
+    if media_type not in ("post", "carousel", "reel"):
+        raise OutboundQueueError("نوع محتوا برای صف پست معتبر نیست؛ استوری فقط از دنبالهٔ استوری صف می‌شود.")
     if origin not in ("telegram_photo", "telegram_video", "telegram_album", "telegram_test", "scheduled_post"):
         raise OutboundQueueError("منبع درخواست معتبر نیست.")
     if caption_moved_to_comment and origin not in ("telegram_photo", "telegram_album"):
@@ -130,6 +135,16 @@ async def enqueue_zernio_post(
         raise OutboundQueueError(str(exc)) from exc
     if media_type == "reel":
         safe_options["shareToFeed"] = True
+    if scheduled_for is not None:
+        if not isinstance(scheduled_for, datetime) or scheduled_for.tzinfo is None:
+            raise OutboundQueueError("زمان‌بندی باید دارای منطقهٔ زمانی تهران و معتبر باشد.")
+        scheduled_for = scheduled_for.astimezone(timezone.utc)
+        now = datetime.now(timezone.utc)
+        if (scheduled_for < now + timedelta(seconds=TELEGRAM_SCHEDULE_MIN_LEAD_SECONDS)
+                or scheduled_for > now + timedelta(days=TELEGRAM_SCHEDULE_MAX_DAYS)):
+            raise OutboundQueueError("زمان انتخاب‌شده باید حداقل 5 دقیقه و حداکثر 365 روز در آینده باشد.")
+    else:
+        scheduled_for = datetime.now(timezone.utc)
 
     payload = {
         "owner_id": owner_id,
@@ -150,14 +165,22 @@ async def enqueue_zernio_post(
         payload["legacy_post_id"] = legacy_post_id
     if safe_options:
         payload["instagram_options"] = safe_options
+    if origin in ("telegram_photo", "telegram_video", "telegram_album"):
+        paths = [owned_supabase_storage_path(url) for url in media_urls]
+        if any(path is None for path in paths):
+            raise OutboundQueueError("رسانهٔ تلگرام در Storage پروژه پیدا نشد؛ صف‌گذاری متوقف شد.")
+        payload["storage_paths"] = paths
 
     inserted = (await session.execute(text("""
         INSERT INTO public.outbound_queue
-            (idempotency_key, action_type, provider, payload, status, max_attempts)
-        VALUES (:key, 'post', 'zernio', CAST(:payload AS jsonb), 'pending', 1)
+            (idempotency_key, action_type, provider, payload, status,
+             scheduled_for, max_attempts)
+        VALUES (:key, 'post', 'zernio', CAST(:payload AS jsonb), 'pending',
+                :scheduled_for, 1)
         ON CONFLICT (idempotency_key) DO NOTHING
         RETURNING id
-    """), {"key": idempotency_key, "payload": json.dumps(payload, ensure_ascii=False)})).scalar_one_or_none()
+    """), {"key": idempotency_key, "payload": json.dumps(payload, ensure_ascii=False),
+           "scheduled_for": scheduled_for})).scalar_one_or_none()
     if inserted is not None:
         return {"id": inserted, "status": "pending", "created": True}
 
@@ -187,6 +210,14 @@ async def process_one_zernio_post() -> dict:
         await deliver_one_confirmed_notification()
         await reconcile_one_stalled_processing_post()
         await refresh_one_accepted_post()
+        # Storage DELETE is permitted only after a verified published GET;
+        # it never claims a publishing job or repeats a provider POST.
+        try:
+            from app.services.storage_cleanup import cleanup_one_confirmed_media
+
+            await cleanup_one_confirmed_media("post")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("post Storage cleanup deferred error=%s", type(exc).__name__)
         return {"claimed": 0, "published_requests": 0}
 
     async with SessionLocal() as session:
@@ -314,6 +345,13 @@ async def process_one_zernio_post() -> dict:
         logger.warning("post confirmation deferred queue_id=%s error=%s", queue_id, type(exc).__name__)
         checked = None
     confirmed = bool(checked and checked["payload"].get("provider_status") == "published")
+    if confirmed:
+        try:
+            from app.services.storage_cleanup import cleanup_one_confirmed_media
+
+            await cleanup_one_confirmed_media("post")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("confirmed post Storage cleanup deferred error=%s", type(exc).__name__)
     return {"claimed": 1, "published_requests": 1,
             "state": "published" if confirmed else "accepted", "queue_id": queue_id}
 

@@ -10,6 +10,7 @@ import Automation from './components/Automation.jsx'
 import Settings from './components/Settings.jsx'
 import Safety from './components/Safety.jsx'
 import Integrations from './components/Integrations.jsx'
+import TelegramSchedulePicker from './components/TelegramSchedulePicker.jsx'
 
 const TABS = [
   { id: 'dashboard', label: 'داشبورد', icon: '📊' },
@@ -34,6 +35,13 @@ export default function App() {
   })
   const [me, setMe] = useState(null)
   const [status, setStatus] = useState('loading') // loading | ready | noauth
+  const [scheduleEntry] = useState(() => {
+    const params = new URLSearchParams(window.location.search)
+    const target = params.get('schedule')
+    const item = Number(params.get('item'))
+    return (['draft', 'queue'].includes(target) && Number.isSafeInteger(item) && item > 0)
+      ? { target, item } : null
+  })
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
@@ -83,6 +91,18 @@ export default function App() {
             تلاش دوباره
           </button>
         </div>
+      </div>
+    )
+  }
+
+  if (scheduleEntry) {
+    return (
+      <div className="app">
+        <header className="topbar"><div>
+          <div style={{ fontWeight: 800, fontSize: 18 }}>گراما — انتخاب زمان انتشار</div>
+          <div style={{ fontSize: 11.5, color: 'var(--muted)' }}>تقویم شمسی · ساعت تهران</div>
+        </div></header>
+        <TelegramSchedulePicker target={scheduleEntry.target} item={scheduleEntry.item} />
       </div>
     )
   }

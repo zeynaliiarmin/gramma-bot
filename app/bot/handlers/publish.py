@@ -31,7 +31,6 @@ from app.db.repositories import (
 )
 from app.models import Media, Post
 from app.services.media_storage import save_downloaded_media, save_downloaded_media_serverless
-from app.services.telegram_post_drafts import clear_pending_media_intent
 
 settings = get_settings()
 router = Router(name="publish")
@@ -47,49 +46,23 @@ KIND_LABEL = {
 
 @router.callback_query(F.data == "publish:menu")
 async def cb_publish_menu(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await clear_pending_media_intent(callback.from_user.id, callback.message.chat.id)
     await callback.message.edit_text("📤 <b>انتشار محتوا</b>", reply_markup=publish_menu())
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("publish:new:"))
-async def cb_publish_new(callback: CallbackQuery, state: FSMContext):
-    kind = callback.data.split(":", 2)[2]
-    # Photo/video/Post/Reel (including old visible buttons) are handled by
-    # the earlier durable draft router. The legacy FSM remains for Story only.
-    if kind != "story":
-        await callback.answer("از دکمهٔ جدید پست یا ریلز استفاده کنید.")
-        return
-    await clear_pending_media_intent(callback.from_user.id, callback.message.chat.id)
-    await state.update_data(publish_kind=kind)
-
-    # Multi-page support: pick the ACTIVE page (switchable in /settings).
-    async with SessionLocal() as session:
-        account = await get_active_account(session, callback.from_user.id)
-        if not account:
-            await callback.message.edit_text(tr(None, "require_connect"))
-            await callback.answer()
-            return
-        await state.update_data(publish_account_id=account.id)
-
-    await state.set_state(MediaWait.waiting)
-    hint = {
-        "photo": "یک عکس بفرستید (کپشن را در توضیح فایل بنویسید).",
-        "video": "یک ویدیو بفرستید.",
-        "reel": "یک ویدیو عمودی برای ریلز بفرستید.",
-        "story": "یک عکس یا ویدیو کوتاه برای استوری بفرستید.",
-        "carousel": "عکس‌ها را یکی‌یکی بفرستید؛ بعد از هر عکس «ادامه/پایان» را بزنید.",
-    }[kind]
-    page_hint = f"🎯 پیج مقصد: <b>{account.username}</b>\n(با /settings می‌توانید پیج فعال را تغییر دهید)"
-    await callback.message.edit_text(f"🖼 <b>{KIND_LABEL[kind]}</b>\n{page_hint}\n{hint}")
-    await callback.answer()
+# Durable Story/album reception now lives in telegram_stories (earlier router).
+# No path here starts an in-memory Story FSM or queues Story media.
 
 
 @router.message(MediaWait.waiting, F.content_type.in_({ContentType.PHOTO, ContentType.VIDEO, ContentType.DOCUMENT, ContentType.VIDEO_NOTE}))
 async def media_received(message: Message, state: FSMContext):
     data = await state.get_data()
     kind = data.get("publish_kind", "photo")
+    if kind == "story":
+        # A pre-deploy in-memory dialog must not resurrect the obsolete Story
+        # path. The private database-backed Story FSM is the only Story entry.
+        await message.answer("این حالت قدیمی استوری منقضی شده است؛ از دکمهٔ «📸 استوری» دوباره شروع کنید.")
+        return
     caption = (message.caption or "").strip()
     is_video = message.content_type in (ContentType.VIDEO, ContentType.VIDEO_NOTE)
 
@@ -206,7 +179,6 @@ async def cb_carousel_done(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "publish:confirm")
 async def cb_publish_confirm(callback: CallbackQuery):
     """Used by the AI-caption flow to open the publish menu."""
-    await clear_pending_media_intent(callback.from_user.id, callback.message.chat.id)
     await callback.message.edit_text(
         "رسانه را بفرستید:", reply_markup=publish_menu()
     )

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 MAIN_KB = [
     ("📸 پست", "publish:wait:post"),
     ("🎬 ریلز", "publish:wait:reel"),
+    ("📸 استوری", "publish:new:story"),
     ("📤 انتشار محتوا", "publish:menu"),
     ("📅 تقویم محتوا", "calendar:menu"),
     ("💬 کامیونیتی", "community:menu"),

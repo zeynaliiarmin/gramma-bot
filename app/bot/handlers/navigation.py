@@ -27,7 +27,6 @@ from app.db.repositories import (
 )
 from app.models import InstagramAccount
 from app.services.meta.service import InstagramService
-from app.services.telegram_post_drafts import clear_pending_media_intent
 
 settings = get_settings()
 router = Router(name="navigation")
@@ -46,7 +45,6 @@ def _menu_by_target(target: str):
 @router.callback_query(F.data.startswith("nav:"))
 async def cb_nav(callback: CallbackQuery):
     target = callback.data.split(":", 1)[1]
-    await clear_pending_media_intent(callback.from_user.id, callback.message.chat.id)
     kb = _menu_by_target(target)()
     labels = {
         "home": "🏠 منوی اصلی",
@@ -66,8 +64,6 @@ async def cb_nav(callback: CallbackQuery):
 @router.message(F.text.in_(["📋 منوی کامل", "منوی کامل"]))
 async def msg_full_menu(message: Message):
     """The persistent reply-keyboard button opens the complete inline menu."""
-    if message.from_user:
-        await clear_pending_media_intent(message.from_user.id, message.chat.id)
     await message.answer(
         "📋 منوی کامل — همه امکانات ربات:",
         reply_markup=full_menu(),
@@ -116,7 +112,6 @@ async def cmd_settings(message: Message):
 # ── Settings section ─────────────────────────────────────────
 @router.callback_query(F.data == "settings:menu")
 async def cb_settings_menu(callback: CallbackQuery):
-    await clear_pending_media_intent(callback.from_user.id, callback.message.chat.id)
     async with SessionLocal() as session:
         user = await get_or_create_user(
             session,

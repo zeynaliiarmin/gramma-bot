@@ -137,7 +137,7 @@ from aiogram.types import CallbackQuery  # noqa: E402
 
 from app.bot.handlers import (  # noqa: E402
     account, ai, calendar, collab, community, direct,
-    insights, navigation, outbound, telegram_drafts, publish, schedule, search, studio,
+    insights, navigation, outbound, telegram_stories, telegram_drafts, telegram_schedule_ui, publish, schedule, search, studio,
 )
 from app.bot.main import (  # noqa: E402
     DatabaseMiddleware,
@@ -165,7 +165,7 @@ def _build_webhook_dispatcher() -> Dispatcher:
     dp.message.middleware(DatabaseMiddleware())
     dp.errors.middleware(ErrorHandlerMiddleware())
     for module in (
-        telegram_drafts, outbound, account, ai, calendar, collab, community, direct,
+        telegram_stories, telegram_drafts, telegram_schedule_ui, outbound, account, ai, calendar, collab, community, direct,
         insights, navigation, publish, schedule, search, studio,
     ):
         dp.include_router(_detached_copy(module.router))
@@ -302,6 +302,7 @@ async def cron_trigger(job: str, request: Request):
 
       * publish                   — enqueue due posts (every 1 min)
       * outbound-post             — submit at most one queued Zernio post (every 5 min)
+      * outbound-story            — submit at most one released Story slide (separate 1 min)
       * telegram-albums           — assemble quiet albums and show settings (every 1 min; never publish)
       * process-comment-queue     — drain the comment-reply queue (every 5 min)
       * check-instagram-health    — probe connected pages (every 10 min)
@@ -313,7 +314,7 @@ async def cron_trigger(job: str, request: Request):
     cron_secret = get_settings().cron_secret
     # Unlike legacy cron routes, BOTH protected jobs must NEVER run when
     # CRON_SECRET is missing. Neither accepts GET.
-    if job in ("outbound-post", "telegram-albums") and not cron_secret:
+    if job in ("outbound-post", "outbound-story", "telegram-albums") and not cron_secret:
         return Response(status_code=503, content="cron secret not configured")
     if cron_secret:
         provided = request.headers.get("X-Cron-Secret", "")
@@ -330,6 +331,18 @@ async def cron_trigger(job: str, request: Request):
             return {"ok": True, **result}
         except Exception:  # noqa: BLE001
             logger.exception("outbound post worker failed; claimed jobs are never retried")
+            return Response(status_code=500, content='{"ok":false,"retry_safe":false}')
+
+    if job == "outbound-story":
+        if request.method != "POST":
+            return Response(status_code=405, content="POST required")
+        from app.services.outbound_story_queue import process_one_zernio_story
+
+        try:
+            result = await process_one_zernio_story()
+            return {"ok": True, **result}
+        except Exception:  # noqa: BLE001
+            logger.exception("story-only worker failed; claimed jobs are never retried")
             return Response(status_code=500, content='{"ok":false,"retry_safe":false}')
 
     if job == "telegram-albums":

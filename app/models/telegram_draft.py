@@ -55,6 +55,8 @@ class TelegramPostDraft(Base):
         Boolean, nullable=False, default=False, server_default=text("false"),
     )
     visible_caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Chosen in Tehran/Jalali UI, stored as UTC; only the final button enqueues.
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     options: Mapped[dict[str, Any]] = mapped_column(
         JSON().with_variant(JSONB, "postgresql"), nullable=False,
         default=dict, server_default=text("'{}'"),

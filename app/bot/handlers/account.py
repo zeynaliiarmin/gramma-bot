@@ -37,7 +37,6 @@ from app.services.limits import (
     count_accounts_for_user,
 )
 from app.services.meta.oauth import build_authorization_url
-from app.services.telegram_post_drafts import clear_pending_media_intent
 from app.webapp.auth import make_miniapp_ticket
 
 settings = get_settings()
@@ -85,9 +84,8 @@ def _welcome_text(name: str, page_count: int) -> str:
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
-    if message.from_user:
-        await clear_pending_media_intent(message.from_user.id, message.chat.id)
+    # Opening the welcome screen must never discard a draft or durable waiting
+    # mode. Only its own explicit Cancel button can end a media dialog.
     async with SessionLocal() as session:
         # Hard cap: at most MAX_TOTAL_USERS registered Telegram users.
         allowed, reason = await can_register_user(session, message.from_user.id)
@@ -111,7 +109,8 @@ async def cmd_start(message: Message, state: FSMContext):
 
     keyboard = full_menu()
     await message.answer(
-        _welcome_text(message.from_user.first_name, page_count),
+        _welcome_text(message.from_user.first_name, page_count)
+        + "\n\n📌 /start فقط منو را باز می‌کند؛ پیش‌نویس/استوری و حالت انتظار شما محفوظ است و تنها با «لغو» بسته می‌شود.",
         reply_markup=keyboard,
     )
     # Persistent «📋 منوی کامل» reply button — always visible in the chat.
@@ -135,8 +134,13 @@ async def cmd_help(message: Message):
         "و روی پست کپشن کوتاه یا خالی بگذارید؛ درج کامنت به مجوز comments اتصال Zernio نیاز دارد.\n"
         "⚠️ در مسیر فعلی Zernio برای ویدیوی تکی گزینهٔ مستندِ پستِ غیرریلز "
         "یا تنظیم Poll/Prompt نداریم؛ این محدودیتِ این اتصال است، نه ممنوعیت کلی Meta.\n\n"
-        "رسانه هرگز با ارسال خودکار وارد صف نمی‌شود: فقط دکمهٔ «تأیید نهایی؛ افزودن به صف» "
-        "در پنل پیش‌نویس آن را صف می‌کند. انتشار بعداً انجام می‌شود.\n"
+        "برای پست، زمان‌بندی را در تنظیمات با ساعت تهران و تقویم شمسی انتخاب کنید؛ "
+        "تنها «تأیید نهایی؛ افزودن به صف» آن را صف می‌کند.\n"
+        "برای استوری، دکمهٔ «📸 استوری» ابتدا تعداد تقریبی اسلایدها را می‌پرسد؛ "
+        "عکس/ویدیوی عمودی را بفرستید و «پایان و صف» را بزنید. "
+        "تعداد نهایی می‌تواند کمتر یا بیشتر از برآورد باشد؛ هر اسلاید استوری جداگانه "
+        "و بعد از تأیید انتشار قبلی با فاصلهٔ تصادفی 5 تا 12 دقیقه منتشر می‌شود.\n"
+        "/start و منوها پیش‌نویس را لغو نمی‌کنند؛ فقط دکمهٔ لغو چنین کاری می‌کند.\n"
         "فقط دستور مجاز برای نمونهٔ صف: /test_post."
     )
     await message.answer(text)
