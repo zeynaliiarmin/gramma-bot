@@ -64,6 +64,10 @@ from api.test_publish_real import router as manual_publish_router
 
 app.include_router(manual_publish_router)
 
+from app.webapp.reply_templates_api import router as reply_templates_router
+
+app.include_router(reply_templates_router)
+
 # CORS: allow ONLY our own Mini-App origin(s). The Telegram WebApp always
 # originates from one of these configured URLs, so nothing else may call the
 # API from a browser. Falls back to permissive '*' for local development
@@ -78,7 +82,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_credentials=False,  # we use an HMAC header, not cookies
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["X-Mini-App-Hash", "Content-Type"],
 )
 

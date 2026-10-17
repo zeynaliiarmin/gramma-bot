@@ -271,7 +271,8 @@ async def cron_trigger(job: str, request: Request):
       * outbound-post             — submit at most one queued Zernio post (every 5 min)
       * outbound-story            — submit at most one released Story slide (separate 1 min)
       * telegram-albums           — assemble quiet albums and show settings (every 1 min; never publish)
-      * process-comment-queue     — drain the comment-reply queue (every 5 min)
+      * process-comment-queue     — drain the legacy Meta comment queue (every 5 min)
+      * auto-replies              — NEW ChatbotX inbox worker (NOT SCHEDULED; OFF)
       * check-instagram-health    — probe connected pages (every 10 min)
       * reset-daily-counters      — reports today's counters (00:00)
       * daily-report              — 23:59 Tehran admin report + alerts
@@ -281,12 +282,28 @@ async def cron_trigger(job: str, request: Request):
     cron_secret = get_settings().cron_secret
     # Unlike legacy cron routes, BOTH protected jobs must NEVER run when
     # CRON_SECRET is missing. Neither accepts GET.
-    if job in ("outbound-post", "outbound-story", "telegram-albums") and not cron_secret:
+    if job in ("outbound-post", "outbound-story", "telegram-albums", "auto-replies") and not cron_secret:
         return Response(status_code=503, content="cron secret not configured")
     if cron_secret:
         provided = request.headers.get("X-Cron-Secret", "")
         if not hmac.compare_digest(provided.encode(), cron_secret.encode()):
             return Response(status_code=403, content="forbidden")
+
+    if job == "auto-replies":
+        # Phase 4 intentionally ships with NO cron schedule and the flag OFF.
+        # A separate explicit owner approval is required before either changes.
+        if request.method != "POST":
+            return Response(status_code=405, content="POST required")
+        if not get_settings().auto_reply_worker_enabled:
+            return Response(status_code=503, content="auto-reply worker disabled")
+        from app.services.auto_reply_queue import process_auto_reply_batch
+
+        try:
+            result = await process_auto_reply_batch()
+            return {"ok": True, **result}
+        except Exception:  # noqa: BLE001
+            logger.exception("auto-reply worker failed; uncertain sends are never replayed")
+            return Response(status_code=500, content='{"ok":false,"retry_safe":false}')
 
     if job == "outbound-post":
         if request.method != "POST":

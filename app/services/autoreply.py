@@ -1,8 +1,7 @@
 """Gramma — smart auto-replies for DMs.
 
 * Each account can hold a set of keyword → reply rules (`AutoReply` rows).
-* FAQ replies are offered as quick buttons ("Smart Replies") using a simple
-  FAQ bank, so unsupported questions still get a warm canned answer.
+* No canned business answers are seeded: owners supply their own facts.
 * The webhook event consumer can trigger these automatically for incoming
   messages (see webhook.py).
 
@@ -102,10 +101,5 @@ async def add_rule(session: AsyncSession, account_id: int, keywords: str, reply:
     return rule
 
 
-FAQ_BANK = [
-    ("قیمت", "برای اطلاع از قیمت‌ها، لطفاً به هایلایت «قیمت» مراجعه کنید یا بفرمایید کدام محصول؟"),
-    ("سفارش", "سفارش شما ثبت می‌شود؛ لطفاً مشخصات و آدرس را بفرستید 🙏"),
-    ("ارسال", "ارسال سفارش‌ها ۲ تا ۴ روز کاری طول می‌کشد 📦"),
-    ("ساعت کاری", "ساعت پاسخ‌گویی ما: ۹ صبح تا ۹ شب، همه‌روزه."),
-    ("محصول", "به‌روزترین محصولات را در پست‌های اخیر پیج می‌بینید ✨"),
-]
+# No built-in price, shipping, size, hours or order-status replies: each
+# account owner creates and reviews their own private ReplyTemplate rows.

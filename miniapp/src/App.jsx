@@ -7,6 +7,7 @@ import Pages from './components/Pages.jsx'
 import Calendar from './components/Calendar.jsx'
 import Collab from './components/Collab.jsx'
 import Automation from './components/Automation.jsx'
+import ReplyTemplates from './components/ReplyTemplates.jsx'
 import Settings from './components/Settings.jsx'
 import Safety from './components/Safety.jsx'
 import Integrations from './components/Integrations.jsx'
@@ -20,6 +21,7 @@ const TABS = [
   { id: 'calendar', label: 'تقویم', icon: '📅' },
   { id: 'collab', label: 'کلبریشن', icon: '🤝' },
   { id: 'automation', label: 'اتوماسیون', icon: '🤖' },
+  { id: 'reply-templates', label: 'قالب‌ها', icon: '📝' },
   { id: 'safety', label: 'امنیت', icon: '🛡' },
   { id: 'integrations', label: 'اتصالات', icon: '🔗' },
 ]
@@ -151,6 +153,7 @@ export default function App() {
       {tab === 'calendar' && <Calendar />}
       {tab === 'collab' && <Collab />}
       {tab === 'automation' && <Automation />}
+      {tab === 'reply-templates' && <ReplyTemplates />}
       {tab === 'safety' && <Safety />}
       {tab === 'integrations' && <Integrations />}
       {tab === 'settings' && <Settings />}

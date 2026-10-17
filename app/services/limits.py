@@ -71,8 +71,15 @@ REASON_USER_LIMIT = "user_limit"
 REASON_USER_TOTAL_LIMIT = "user_total_limit"
 REASON_TOTAL_LIMIT = "total_limit"
 
+# Phase 4 ChatbotX automation budget: one shared pool for all automatic
+# outbound DM + comment replies per page. Manual Mini-App messages NEVER
+# reserve a slot. The private Postgres reserve_auto_reply_slot() function
+# atomically enforces these same fixed ceilings across serverless instances.
+AUTO_REPLY_DAILY_LIMIT = 4500             # Tehran calendar day
+AUTO_REPLY_ROLLING_HOURLY_LIMIT = 200     # previous 3600 seconds
+
 # ─────────────────────────────────────────────────────────────
-# Anti-Block + daily reply caps (single source of truth).
+# Legacy Meta-only comment queue safeguards (left intact; not ChatbotX).
 #
 # Required by production hardening:
 #   * at most DAILY_REPLY_LIMIT comment replies per page per Tehran day;

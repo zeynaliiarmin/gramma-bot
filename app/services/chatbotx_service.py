@@ -32,7 +32,13 @@ logger = logging.getLogger("gramma.chatbotx")
 
 
 class ChatbotXError(Exception):
-    """Raised when ChatbotX is unreachable or returns error."""
+    """ChatbotX error with delivery certainty (never infer it from a timeout)."""
+
+    def __init__(self, message: str, *, status_code: int | None = None,
+                 definitely_not_sent: bool = False):
+        super().__init__(message)
+        self.status_code = status_code
+        self.definitely_not_sent = definitely_not_sent
 
 
 class ChatbotXClient:
@@ -67,7 +73,7 @@ class ChatbotXClient:
 
     async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         if not self.enabled:
-            raise ChatbotXError("ChatbotX disabled (token not set)")
+            raise ChatbotXError("ChatbotX disabled (token not set)", definitely_not_sent=True)
         url = f"{self.base_url}{path}"
         try:
             if self._transport:
@@ -77,9 +83,15 @@ class ChatbotXClient:
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
                     resp = await client.request(method, url, headers=self._headers(), **kwargs)
             return resp
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+            # No request was delivered over a working connection.
+            logger.warning("ChatbotX pre-dispatch connection failure: %s", type(exc).__name__)
+            raise ChatbotXError("ChatbotX connection unavailable", definitely_not_sent=True) from exc
         except httpx.HTTPError as exc:
-            logger.warning("ChatbotX request failed %s %s: %s", method, path, exc)
-            raise ChatbotXError(f"ChatbotX unreachable: {exc}") from exc
+            # Read/write timeouts and broken connections *after dispatch* are
+            # ambiguous: the provider may already have sent the message.
+            logger.warning("ChatbotX delivery unknown: %s", type(exc).__name__)
+            raise ChatbotXError("ChatbotX delivery unknown") from exc
 
     # ── Public API ────────────────────────────────────────────
 
@@ -129,8 +141,13 @@ class ChatbotXClient:
         """Send a message to a conversation."""
         payload = {"message": message, "text": message, **extra}
         resp = await self._request("POST", f"/v1/conversations/{conversation_id}/messages", json=payload)
-        if resp.status_code not in (200, 201):
-            raise ChatbotXError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+        if not 200 <= resp.status_code < 300:
+            # Only explicit request/auth/quota rejection is safe to retry via
+            # another provider. A 5xx or 409 can be post-dispatch: fail closed.
+            raise ChatbotXError(
+                f"ChatbotX HTTP {resp.status_code}", status_code=resp.status_code,
+                definitely_not_sent=resp.status_code in (400, 401, 403, 404, 429),
+            )
         try:
             return resp.json()
         except Exception:

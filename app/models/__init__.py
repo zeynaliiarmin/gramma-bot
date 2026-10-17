@@ -27,6 +27,7 @@ from app.services.templates import PostTemplate  # noqa: F401
 from app.models.telegram_draft import TelegramMediaIntent, TelegramPostDraft  # noqa: F401
 from app.models.telegram_story import TelegramStorySequence, TelegramStorySlide  # noqa: F401
 from app.models.miniapp_publish import MiniappPublishDraft, MiniappPublishMedia  # noqa: F401
+from app.models.auto_messaging import ReplyTemplate, InboxMessage, AutoReplySlot  # noqa: F401
 
 __all__ = [
     "User",
@@ -55,4 +56,7 @@ __all__ = [
     "TelegramStorySlide",
     "MiniappPublishDraft",
     "MiniappPublishMedia",
+    "ReplyTemplate",
+    "InboxMessage",
+    "AutoReplySlot",
 ]

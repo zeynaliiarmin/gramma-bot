@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     chatbotx_workspace_id: str = ""
     chatbotx_webhook_secret: str = ""
     chatbotx_enabled: bool = False
+    # Phase 4: deliberately OFF in production until the owner explicitly
+    # approves and a separate protected schedule is installed. Inline legacy
+    # replies remain on and use the same atomic quota while this flag is off.
+    auto_reply_worker_enabled: bool = False
 
     # ── Zernio (the only Instagram post-publication provider) ──
     # Keep credentials in ignored .env / the existing Vercel secret store only.
