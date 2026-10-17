@@ -130,43 +130,18 @@ async def text_entered(message: Message, state: FSMContext):
             )
         await message.answer(format_hits(hits))
     elif target == "websearch":
-        # Web research — OpenClaw (Tavily) first, direct Tavily fallback.
-        from app.services.openclaw import OpenClawError, web_search_via_openclaw
+        # Web research goes directly through Tavily.
         from app.services.web_search import format_web_results, web_search
 
         await message.answer("🔎 در حال جستجوی وب…")
-        try:
-            summary = await web_search_via_openclaw(
-                message.text or "", language="fa", user_id=message.from_user.id
-            )
-            await message.answer(summary)
-        except OpenClawError:
-            # OpenClaw unavailable → immediate direct-Tavily fallback (no hang).
-            results = await web_search(message.text or "", max_results=5)
-            await message.answer(
-                "⚠️ سرور هوش مصنوعی در دسترس نیست؛ از جستجوی مستقیم استفاده شد.\n\n"
-                + format_web_results(message.text or "", results)
-            )
+        results = await web_search(message.text or "", max_results=5)
+        await message.answer(format_web_results(message.text or "", results))
     elif target == "post_ideas":
-        # Post ideas — OpenClaw first, graceful fallback otherwise.
-        from app.services.openclaw import OpenClawError, generate_post_ideas
+        from app.services.ai import generate_post_ideas
 
         await message.answer("💡 در حال تولید ایده‌ها…")
         topic = (message.text or "").strip()
-        try:
-            ideas = await generate_post_ideas(
-                topic, count=5, language="fa", user_id=message.from_user.id
-            )
-        except OpenClawError as exc:
-            ideas = (
-                "⚠️ سرور هوش مصنوعی در دسترس نیست.\n"
-                "نمونه ایده برای شروع:\n"
-                "1. پشت‌صحنه کار خود را نشان دهید\n"
-                "2. معرفی محصول با زاویه جدید\n"
-                "3. پاسخ به سوالات پرتکرار فالوورها\n"
-                "4. نظرسنجی و چالش با فالوورها\n"
-                "5. معرفی مشتریان و نظرات آن‌ها"
-            )
+        ideas = await generate_post_ideas(topic, count=5, language="fa")
         await message.answer(ideas)
     elif target == "template_title":
         # Fill a chosen post template.

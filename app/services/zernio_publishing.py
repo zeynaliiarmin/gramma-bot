@@ -1,9 +1,9 @@
-"""Zernio's official async SDK: opt-in Instagram drafts and scheduling.
+"""The sole Instagram post-publication adapter, using Zernio's official SDK.
 
-This is intentionally separate from ChatbotX messaging and the existing Meta /
-private publishing workers. No webhook, automatic publishing, or account
-connection is performed here. Only the authenticated admin can use the API
-routes, and each provider account must match an InstagramAccount they own.
+ChatbotX and Meta remain messaging/insights integrations, not publishers.
+Both manual and scheduled publication must verify an active Zernio account
+against a connected InstagramAccount owned by the caller before this adapter
+is invoked. POST retries are disabled to avoid duplicate public posts.
 """
 
 from __future__ import annotations
@@ -226,6 +226,79 @@ class ZernioPublisher:
             "status": status,
             "mode": mode,
             "scheduled_jalali": jalali.to_jalali_str(scheduled) if scheduled else None,
+        }
+
+    async def publish_post(
+        self,
+        *,
+        zernio_account_id: str,
+        expected_username: str,
+        caption: str,
+        media_urls: list[str],
+        idempotency_key: str,
+        media_type: str = "post",
+    ) -> dict[str, Any]:
+        """Submit one real post for immediate publication, never a draft/mock.
+
+        The caller MUST durably claim ``idempotency_key`` before invoking this
+        method. A timeout has an ambiguous result: neither the SDK nor this
+        adapter automatically retries a publish request.
+        """
+        if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+            raise ZernioPublishError("کلید جلوگیری از انتشار تکراری لازم است.")
+        if media_type not in ("post", "story", "reel", "carousel"):
+            raise ZernioPublishError("نوع محتوا نامعتبر است.")
+        if not isinstance(caption, str) or len(caption) > 2200 or (not caption.strip() and media_type != "story"):
+            raise ZernioPublishError("برای پست/ریلز/کاروسل کپشن تا 2200 نویسه لازم است.")
+        items = _media_items(media_urls, media_type)
+        if not zernio_account_id or not normalize_username(expected_username):
+            raise ZernioPublishError("اکانت Zernio نامعتبر است.", 403)
+
+        # Refresh the provider list: never publish to an ID from a stale cache.
+        provider_accounts = await self.list_instagram_accounts()
+        matches = [a for a in provider_accounts if a["id"] == zernio_account_id]
+        if len(matches) != 1 or normalize_username(matches[0]["username"]) != normalize_username(expected_username):
+            raise ZernioPublishError("این پیج در Zernio به حساب شما متصل نیست.", 403)
+        if not matches[0]["active"]:
+            raise ZernioPublishError("اتصال پیج در Zernio غیرفعال است؛ آن را دوباره متصل کنید.", 409)
+
+        platform = {"platform": "instagram", "accountId": zernio_account_id}
+        if media_type == "story":
+            platform["platformSpecificData"] = {"contentType": "story"}
+        try:
+            async with self._client_factory() as client:
+                response = await client.posts.acreate(
+                    content=caption.strip() if media_type != "story" else (caption.strip() or "استوری"),
+                    platforms=[platform],
+                    media_items=items,
+                    is_draft=False,
+                    scheduled_for=None,
+                    timezone="Asia/Tehran",
+                    metadata={"idempotencyKey": idempotency_key},
+                    publish_now=True,
+                )
+        except ZernioError as exc:
+            raise _provider_error(exc, "publish_post") from exc
+        except Exception as exc:
+            logger.warning("Zernio publish_post failed: %s", type(exc).__name__)
+            raise ZernioPublishError(
+                "نتیجه انتشار در Zernio نامشخص است؛ پیش از تلاش دوباره داشبورد را بررسی کنید.", 502
+            ) from exc
+        post = response.post
+        if post is None or not post.field_id:
+            raise ZernioPublishError("پاسخ Zernio ناقص است؛ قبل از تکرار، داشبورد را بررسی کنید.", 502)
+        status = getattr(post.status, "value", post.status) if post.status else "unknown"
+        if status not in ("publishing", "published"):
+            raise ZernioPublishError(
+                "Zernio انتشار فوری را تأیید نکرد؛ قبل از هر تلاش دیگر وضعیت پست را در داشبورد بررسی کنید.", 502
+            )
+        return {
+            "ok": True,
+            "provider": "zernio",
+            "post_id": post.field_id,
+            "status": status,
+            "published": status == "published",
+            "idempotency_key": idempotency_key,
         }
 
 

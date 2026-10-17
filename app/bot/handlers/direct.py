@@ -73,8 +73,8 @@ async def cb_inbox(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("dm:suggest:"))
 async def cb_dm_suggest(callback: CallbackQuery):
-    """AI-suggested reply to a DM — routed through OpenClaw (fallback)."""
-    from app.services.openclaw import OpenClawError, suggest_dm_reply
+    """Suggest a Persian DM reply using AvalAI or the built-in fallback."""
+    from app.services.ai import draft_reply
 
     thread_id = callback.data.split(":", 2)[2]
     await callback.answer("در حال تولید پیشنهاد…")
@@ -103,16 +103,10 @@ async def cb_dm_suggest(callback: CallbackQuery):
         )
         return
 
-    try:
-        suggestion = await suggest_dm_reply(
-            last_message,
-            sender_name=sender,
-            language="fa",
-            user_id=callback.from_user.id,
-            account_id=account.id if account else None,
-        )
-    except OpenClawError:
-        suggestion = "سلام! ممنون از پیام شما 🙏 به‌زودی پاسخ کامل را ارسال می‌کنیم."
+    suggestion = await draft_reply(
+        f"پیام از {sender}: {last_message}" if sender else last_message,
+        locale="fa",
+    ) or "سلام! ممنون از پیام شما 🙏 به‌زودی پاسخ کامل را ارسال می‌کنیم."
 
     await callback.message.edit_text(
         f"🎯 <b>پیشنهاد پاسخ هوشمند:</b>\n\n{suggestion}\n\n"

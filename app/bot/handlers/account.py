@@ -272,16 +272,16 @@ async def _build_oauth_message(session, acc: InstagramAccount, message: Message,
             "✅ پیج <b>@zeynalikids</b> هم‌اکنون از طریق ChatbotX متصل است.\n"
             "ChatbotX از Login with Instagram استفاده می‌کند و نیازی به اپ متا ندارد — تحریم را دور می‌زند.\n\n"
             "📌 برای اتصال پیج جدید:\n"
-            "۱. وارد پنل ChatbotX شوید: https://app.chatbotx.io\n"
-            "۲. بخش Instagram → Connect Account → Login with Instagram\n"
-            "۳. پیج خود را انتخاب و مجوزها را تایید کنید\n"
-            "۴. سپس در ربات Gramma دکمه «بررسی اتصال» را بزنید\n\n"
+            "1. وارد پنل ChatbotX شوید: https://app.chatbotx.io\n"
+            "2. بخش Instagram → Connect Account → Login with Instagram\n"
+            "3. پیج خود را انتخاب و مجوزها را تایید کنید\n"
+            "4. سپس در ربات Gramma دکمه «بررسی اتصال» را بزنید\n\n"
             "💬 قابلیت‌ها از طریق ChatbotX:\n"
             "• پاسخ خودکار کامنت‌ها (1000/روز)\n"
             "• پاسخ دایرکت (نامحدود)\n"
             "• ریپلای استوری\n"
             "• اتصال به AvalAI/DeepSeek برای هوش مصنوعی\n\n"
-            "📤 برای انتشار پست/استوری/ریلز از OpenClaw (private-enabled) استفاده می‌شود."
+            "📤 انتشار محتوا فقط از طریق Zernio و پیجِ مستقلِ متصل انجام می‌شود."
         )
         kb = InlineKeyboardMarkup(
             inline_keyboard=[

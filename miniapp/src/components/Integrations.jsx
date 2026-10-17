@@ -8,10 +8,6 @@ function fmt(n) {
 export default function Integrations() {
   const [status, setStatus] = useState(null)
   const [error, setError] = useState('')
-  const [publishing, setPublishing] = useState(false)
-  const [pubForm, setPubForm] = useState({ account_id: '', image_url: '', caption: '', media_type: 'post' })
-  const [pubResult, setPubResult] = useState(null)
-
   const [zAccounts, setZAccounts] = useState([])
   const [zLoading, setZLoading] = useState(false)
   const [zSaving, setZSaving] = useState(false)
@@ -26,13 +22,6 @@ export default function Integrations() {
     try {
       const s = await api('/api/integrations/status')
       setStatus(s)
-      if (s.reply_limits && s.reply_limits.accounts_count > 0) {
-        // Try to get accounts for publish form
-        const me = await api('/api/me')
-        if (me.accounts && me.accounts.length > 0) {
-          setPubForm(f => ({ ...f, account_id: f.account_id || me.accounts[0].id }))
-        }
-      }
       if (s.zernio?.configured) {
         setZLoading(true)
         setZError('')
@@ -57,28 +46,6 @@ export default function Integrations() {
   }
 
   useEffect(() => { load() }, [])
-
-  async function handlePublish(e) {
-    e.preventDefault()
-    setPublishing(true)
-    setPubResult(null)
-    try {
-      const res = await api('/api/instagram-publisher/publish', {
-        method: 'POST',
-        body: {
-          account_id: Number(pubForm.account_id),
-          image_url: pubForm.image_url,
-          caption: pubForm.caption,
-          media_type: pubForm.media_type,
-        }
-      })
-      setPubResult(res)
-    } catch (err) {
-      setPubResult({ ok: false, error: err.message })
-    } finally {
-      setPublishing(false)
-    }
-  }
 
   async function handleZernioSubmit(e) {
     e.preventDefault()
@@ -118,26 +85,15 @@ export default function Integrations() {
 
   const cbx = status.chatbotx || {}
   const zernio = status.zernio || {}
-  const pub = status.instagram_publisher || {}
-  const oc = status.openclaw || {}
   const limits = status.reply_limits || {}
   const meta = status.meta_app || {}
-
-  // OpenClaw gateway health → badge for the publishing card
-  const gwConfigured = !!(pub.gateway && pub.gateway.configured) || !!oc.configured
-  const gwReachable = oc.reachable === true
-  const gwBadge = gwConfigured
-    ? (gwReachable ? '✅ درگاه متصل' : (oc.reachable === false ? '⚠️ درگاه قطع' : '🛰 درگاه فعال'))
-    : '❌ بدون درگاه'
-  const gwColor = gwConfigured ? (gwReachable ? 'green' : '#856404') : '#721c24'
-  const gwBg = gwConfigured ? (gwReachable ? '#e6f9ed' : '#fff3cd') : '#f8d7da'
 
   return (
     <>
       <div className="card">
         <h3>🔗 وضعیت یکپارچه‌سازی</h3>
         <p style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 12 }}>
-          ChatbotX برای پیام‌رسانی · Zernio برای انتشار/زمان‌بندی اختیاری · مسیر قبلی OpenClaw جداگانه حفظ شده است.
+          ChatbotX برای پیام‌رسانی · Zernio تنها مسیر انتشار محتوا و زمان‌بندی آن است.
         </p>
 
         <div className="list-item" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
@@ -167,30 +123,6 @@ export default function Integrations() {
           </div>
         </div>
 
-        <div className="list-item" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6, marginTop: 8 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <b>📤 OpenClaw — انتشار محتوا</b>
-            <span style={{
-              fontSize: 11,
-              padding: '2px 8px',
-              borderRadius: 10,
-              background: gwBg,
-              color: gwColor
-            }}>
-              {gwBadge}
-            </span>
-          </div>
-          <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-            مسیر انتشار: {gwConfigured ? <>درگاه OpenClaw + Browser Use Cloud (<b>{(pub.gateway && pub.gateway.host) || oc.gateway_host || '—'}</b>)</> : 'درگاه تنظیم نشده'}<br />
-            Browser Use: {(pub.gateway && pub.gateway.browser_use_key_set) || oc.browser_use_key_set ? '✅ کلید ست شده' : '⚠️ کلید ست نشده'}<br />
-            محدودیت: {fmt(pub.daily_limit || 3)} پست/روز · حداقل {fmt(pub.min_interval_minutes || 30)} دقیقه فاصله بین انتشارها<br />
-            حالت پشتیبان: {pub.instagrapi_installed ? 'instagrapi نصب است' : 'بدون instagrapi (فقط درگاه)'}<br />
-            ⚠️ تونل فعلی موقتی است؛ اگر ترموکس بسته شود، درگاه قطع می‌شود.
-            {oc.reachable === false && oc.error && <><br />⚠️ خطای درگاه: {oc.error}</>}
-            {pub.error && <><br />⚠️ {pub.error}</>}
-          </div>
-        </div>
-
         {zernio.admin && (
           <div className="list-item" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6, marginTop: 8 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
@@ -200,7 +132,7 @@ export default function Integrations() {
               </span>
             </div>
             <div style={{ fontSize: 11, color: 'var(--muted)' }}>
-              مستقل از ChatbotX · {fmt(zAccounts.filter(a => a.active).length)} پیج مجاز · فقط پیش‌نویس یا زمان‌بندی دستی
+              مستقل از ChatbotX · {fmt(zAccounts.filter(a => a.active).length)} پیج مجاز · تنها مسیر انتشار محتوا
             </div>
           </div>
         )}
@@ -228,71 +160,11 @@ export default function Integrations() {
         </div>
       </div>
 
-      <div className="card">
-        <h3>📤 انتشار محتوا (OpenClaw)</h3>
-        <p style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 10 }}>
-          حداکثر 3 پست در روز برای هر پیج — برای کاهش ریسک بلاک. در حالت mock، انتشار شبیه‌سازی می‌شود.
-        </p>
-        <form onSubmit={handlePublish} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <input
-              type="number"
-              placeholder="ID پیج"
-              value={pubForm.account_id}
-              onChange={e => setPubForm({ ...pubForm, account_id: e.target.value })}
-              style={{ flex: 1 }}
-              required
-            />
-            <select
-              value={pubForm.media_type}
-              onChange={e => setPubForm({ ...pubForm, media_type: e.target.value })}
-              style={{ flex: 1 }}
-            >
-              <option value="post">پست</option>
-              <option value="story">استوری</option>
-              <option value="reel">ریلز</option>
-              <option value="carousel">کاروسل</option>
-            </select>
-          </div>
-          <input
-            type="url"
-            placeholder="آدرس تصویر/ویدیو (https://...)"
-            value={pubForm.image_url}
-            onChange={e => setPubForm({ ...pubForm, image_url: e.target.value })}
-            required
-          />
-          <textarea
-            placeholder="کپشن..."
-            value={pubForm.caption}
-            onChange={e => setPubForm({ ...pubForm, caption: e.target.value })}
-            rows={3}
-          />
-          <button className="btn" type="submit" disabled={publishing}>
-            {publishing ? '⏳ در حال انتشار...' : '📤 انتشار'}
-          </button>
-        </form>
-        {pubResult && (
-          <div className={`banner ${pubResult.ok ? 'ok' : 'err'}`} style={{ marginTop: 10 }}>
-            {pubResult.ok ? (
-              <>
-                ✅ منتشر شد (mock={String(pubResult.mock)})<br />
-                ID: {pubResult.media_id}<br />
-                لینک: <a href={pubResult.permalink} target="_blank" rel="noreferrer">{pubResult.permalink}</a><br />
-                باقی‌مانده امروز: {pubResult.limit_info?.remaining_after ?? '?'}<br />
-                {pubResult.warning && <><br />⚠️ {pubResult.warning}</>}
-              </>
-            ) : (
-              <>❌ خطا: {pubResult.error}</>
-            )}
-          </div>
-        )}
-      </div>
-
       {zernio.admin && (
         <div className="card">
           <h3>🗓 Zernio — پیش‌نویس و زمان‌بندی اینستاگرام</h3>
           <p style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 2 }}>
-            این مسیر از ChatbotX و انتشار OpenClaw جداست؛ هیچ پاسخ خودکاری یا انتشار فوری انجام نمی‌دهد.
+            این مسیر از پیام‌رسانی ChatbotX جداست؛ این فرم فقط پیش‌نویس یا زمان‌بندی دستی می‌سازد و انتشار فوری نمی‌کند.
             برای انتشار، پیج حرفه‌ای خود را مستقلاً در <a href="https://zernio.com" target="_blank" rel="noreferrer">داشبورد Zernio</a> متصل کنید.
             زمان‌بندی‌ها در Zernio نگهداری می‌شوند، نه تقویم داخلی گراما.
           </p>

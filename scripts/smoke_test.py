@@ -57,22 +57,14 @@ async def main() -> None:
         assert theirs == [], "isolation violated!"
         print("✅ data isolation OK")
 
-    # 4) simulated publish
-    async with SessionLocal() as session:
-        acc = await session.get(InstagramAccount, acc_id)
-        svc = InstagramService()
-        res = await svc.publish_media(acc, "https://example.com/x.jpg", "hello")
-        assert "id" in res
-        print("✅ simulated publish OK:", res["id"])
-
-    # 5) health report
+    # 4) health report
     async with SessionLocal() as session:
         acc = await session.get(InstagramAccount, acc_id)
         report = await build_health_report(acc)
         assert report.metrics, "no metrics"
         print("✅ health report OK")
 
-    # 6) caption engine (fallback)
+    # 5) caption engine (fallback)
     cap = await generate_caption("فروش ویژه", tone="friendly", language="fa")
     assert cap.strip()
     print("✅ caption engine OK ->", cap[:40])

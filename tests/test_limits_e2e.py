@@ -39,13 +39,12 @@ def _settings_off():
     from app.core.config import get_settings
 
     s = get_settings()
-    saved = (s.openclaw_base_url, s.avalai_api_key, s.openai_api_key)
-    s.openclaw_base_url = ""
+    saved = (s.avalai_api_key, s.openai_api_key)
     s.avalai_api_key = ""
     s.openai_api_key = ""
 
     def restore():
-        s.openclaw_base_url, s.avalai_api_key, s.openai_api_key = saved
+        s.avalai_api_key, s.openai_api_key = saved
 
     return restore
 

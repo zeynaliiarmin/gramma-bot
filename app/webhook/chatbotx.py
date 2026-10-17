@@ -232,36 +232,11 @@ async def _check_daily_limit(account: InstagramAccount) -> tuple[bool, int, int]
 
 
 async def _generate_ai_reply(text: str, account_id: Optional[int] = None, user_id: Optional[int] = None) -> Optional[str]:
-    """Generate AI reply via AvalAI (direct).
-
-    OpenClaw is only reachable in local polling mode (it lives on the user's
-    phone at 127.0.0.1); on the serverless webhook runtime it would hang for
-    30s, so we skip it entirely when RUN_MODE=webhook.
-    """
+    """Generate a bounded AvalAI reply, with a safe offline fallback."""
     try:
-        # Try OpenClaw first ONLY when reachable (never on Vercel runtime)
-        import os as _os
-
-        _on_vercel = _os.environ.get("VERCEL") == "1"
-        if getattr(settings, "openclaw_base_url", None) and not _on_vercel:
-            try:
-                from app.services.openclaw import suggest_dm_reply, suggest_comment_reply
-
-                # Use comment or DM based on context
-                if len(text) < 200:  # likely comment
-                    reply = await suggest_comment_reply(text, user_id=user_id, account_id=account_id)
-                else:
-                    reply = await suggest_dm_reply(text, user_id=user_id, account_id=account_id)
-                if reply:
-                    return reply
-            except Exception as exc:
-                logger.warning("openclaw AI failed: %s", exc)
-
-        # Fallback to direct AvalAI
         from app.services.ai import draft_reply
 
-        reply = await draft_reply(text, locale="fa", timeout=5.0)
-        return reply
+        return await draft_reply(text, locale="fa", timeout=5.0)
     except Exception as exc:
         logger.warning("AI reply generation failed: %s", exc)
         return None

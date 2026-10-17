@@ -1,17 +1,13 @@
-"""Gramma — scheduled-publishing job.
+"""Gramma's scheduled publication worker — Zernio is the ONLY publisher.
 
-Executed periodically (Celery beat). For each due scheduled post:
-  1) lock it (status publishing) so two workers never publish twice;
-  2) resolve the owner's account & decrypt token;
-  3) publish via the Graph API (single media / carousel);
-  4) update status + notify the owner on Telegram on success/failure.
-
-Simulation mode makes the whole pipeline testable without Meta credentials.
+A scheduled row is durably claimed before the provider POST. If the provider
+returns an ambiguous error/timeout, the row stays failed with an explicit
+warning; it is never blindly retried (a public post may already exist).
+This worker never calls Meta media publishing or a private/mock publisher.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -20,146 +16,157 @@ from sqlalchemy import select
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models import ActivityLog, InstagramAccount, Media, Post
-from app.services.meta.service import InstagramService
+from app.services.zernio_publishing import (
+    ZernioPublishError,
+    get_zernio_publisher,
+    normalize_username,
+)
 
-settings = get_settings()
 logger = logging.getLogger("gramma.publisher")
+settings = get_settings()
 
 
 async def publish_due_posts() -> dict:
-    """Publish every due scheduled post. Returns a summary dict."""
-    svc = InstagramService()
-    published = 0
-    failed = 0
-
+    """Claim and send each due post once, exclusively through Zernio."""
     async with SessionLocal() as session:
-        now = datetime.now(timezone.utc)
-        result = await session.execute(
-            select(Post).where(
+        rows = (await session.execute(
+            select(Post.id)
+            .where(Post.status == "scheduled", Post.scheduled_at <= datetime.now(timezone.utc))
+            .order_by(Post.scheduled_at.asc(), Post.id.asc())
+            .limit(10)
+        )).scalars().all()
+
+    published = 0
+    accepted = 0
+    failed = 0
+    for post_id in rows:
+        result = await publish_post_by_id(post_id)
+        if result.get("status") == "published":
+            published += 1
+        elif result.get("ok"):
+            accepted += 1
+        elif not result.get("skipped"):
+            failed += 1
+    return {"published": published, "accepted": accepted, "failed": failed}
+
+
+async def publish_post_by_id(post_id: int) -> dict:
+    """Atomically claim a scheduled post, then issue at most one Zernio POST.
+
+    Can be invoked by Celery or the Vercel cron. Account ownership is checked
+    against the configured admin's Telegram ID; one shared Zernio key must not
+    become a cross-tenant publishing credential.
+    """
+    async with SessionLocal() as session:
+        post = (await session.execute(
+            select(Post)
+            .where(
+                Post.id == post_id,
                 Post.status == "scheduled",
-                Post.scheduled_at <= now,
+                Post.scheduled_at <= datetime.now(timezone.utc),
             )
+            .with_for_update(skip_locked=True)
+        )).scalars().first()
+        if post is None:
+            return {"ok": False, "skipped": True}
+        post.status = "publishing"
+        post.publish_started_at = datetime.now(timezone.utc)
+        await session.commit()
+
+        account = await session.get(InstagramAccount, post.account_id)
+        media = (await session.execute(
+            select(Media).where(Media.post_id == post.id).order_by(Media.order_index)
+        )).scalars().all()
+        account_id = post.account_id
+        kind = post.kind
+        caption = post.caption or ""
+        urls = [m.url for m in media]
+        owner_id = account.owner_id if account else None
+        username = account.username if account else ""
+        connected = account.status == "connected" if account else False
+
+    try:
+        if not connected or owner_id not in settings.admin_ids:
+            raise ZernioPublishError("انتشار فقط برای پیج متصلِ متعلق به مدیر مجاز است.", 403)
+        if not urls or any(not url.startswith("https://") for url in urls):
+            raise ZernioPublishError("رسانه باید URL عمومی HTTPS داشته باشد؛ فایل محلی قابل انتشار نیست.")
+        media_type = "post" if kind == "photo" else ("reel" if kind == "video" else kind)
+        publisher = get_zernio_publisher()
+        providers = await publisher.list_instagram_accounts()
+        matches = [a for a in providers if a["active"] and normalize_username(a["username"]) == normalize_username(username)]
+        if len(matches) != 1:
+            raise ZernioPublishError("پیج شما در Zernio متصل و فعال نیست.", 409)
+        result = await publisher.publish_post(
+            zernio_account_id=matches[0]["id"],
+            expected_username=username,
+            caption=caption,
+            media_urls=urls,
+            media_type=media_type,
+            idempotency_key=f"gramma_post_{post_id}",
         )
-        posts = result.scalars().all()
-
-        for post in posts:
-            post.status = "publishing"
-            post.publish_started_at = now
-            await session.commit()
-
-            account = await session.get(InstagramAccount, post.account_id)
-            if account is None:
-                _mark_failed(post, "owner account missing")
+    except Exception as exc:  # noqa: BLE001
+        # Do not leak provider response bodies, keys or account tokens to users.
+        reason = str(exc) if isinstance(exc, ZernioPublishError) else "نتیجه نامشخص است؛ پیش از تلاش دوباره داشبورد Zernio را بررسی کنید."
+        logger.warning("Zernio worker post_id=%s result=%s", post_id, type(exc).__name__)
+        async with SessionLocal() as session:
+            post = await session.get(Post, post_id)
+            if post is not None:
+                post.status = "failed"
+                post.error_message = reason[:500]
+                session.add(ActivityLog(
+                    account_id=account_id, user_id=owner_id, action="zernio_publish_failed",
+                    detail=f"post_id={post_id} {reason[:200]}", level="error",
+                ))
+                if account is not None:
+                    await _notify_owner(session, account, post, success=False, error=reason)
                 await session.commit()
-                failed += 1
-                continue
+        return {"ok": False, "error": reason, "post_id": post_id}
 
-            try:
-                media_rows = (
-                    (
-                        await session.execute(
-                            select(Media)
-                            .where(Media.post_id == post.id)
-                            .order_by(Media.order_index)
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
-
-                if not media_rows:
-                    raise ValueError("no media attached to post")
-
-                media_urls = [m.url for m in media_rows]
-                caption = post.caption or ""
-
-                if post.kind == "carousel" and len(media_urls) > 1:
-                    children = []
-                    for m in media_rows:
-                        child = await svc.create_child_container(
-                            account, m.url, is_video=(m.kind == "video")
-                        )
-                        children.append(child)
-                    result_pub = await svc.publish_carousel(account, children, caption)
-                else:
-                    single = media_rows[0]
-                    result_pub = await svc.publish_media(
-                        account,
-                        single.url,
-                        caption,
-                        is_video=(single.kind == "video"),
-                        is_reel=(post.kind == "reel"),
-                        is_story=(post.kind == "story"),
-                    )
-
-                post.ig_media_id = str(result_pub.get("id", ""))
-                post.ig_permalink = result_pub.get("permalink", "")
-                post.status = "published"
+    # Zernio may initially say processing: never claim an unconfirmed publish.
+    confirmed = result["status"] in ("published", "posted")
+    async with SessionLocal() as session:
+        post = await session.get(Post, post_id)
+        if post is not None:
+            post.ig_media_id = str(result["post_id"])
+            post.status = "published" if confirmed else "publishing"
+            if confirmed:
                 post.published_at = datetime.now(timezone.utc)
-                try:  # live-refresh the Mini-App dashboard
-                    from app.webapp.main import broadcast_refresh
+            session.add(ActivityLog(
+                account_id=account_id, user_id=owner_id,
+                action="zernio_published" if confirmed else "zernio_publish_accepted",
+                detail=f"post_id={post_id} zernio_id={result['post_id']} status={result['status']}",
+                level="info",
+            ))
+            if account is not None:
+                await _notify_owner(session, account, post, success=True, provider_status=result["status"])
+            await session.commit()
+    if confirmed:
+        try:
+            from app.webapp.main import broadcast_refresh
 
-                    await broadcast_refresh(
-                        "posts", {"type": "post_published", "post_id": post.id}
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-                session.add(
-                    ActivityLog(
-                        account_id=account.id,
-                        user_id=account.owner_id,
-                        action="publish",
-                        detail=f"published {post.kind} (media_id={post.ig_media_id})",
-                        level="info",
-                    )
-                )
-                await _notify_owner(session, account, post, success=True)
-                await session.commit()
-                published += 1
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("publish failed post_id=%s", post.id)
-                _mark_failed(post, str(exc))
-                session.add(
-                    ActivityLog(
-                        account_id=account.id,
-                        user_id=account.owner_id,
-                        action="publish",
-                        detail=f"FAILED: {exc}",
-                        level="error",
-                    )
-                )
-                await _notify_owner(session, account, post, success=False, error=str(exc))
-                await session.commit()
-                failed += 1
-
-    return {"published": published, "failed": failed}
+            await broadcast_refresh("posts", {"type": "post_published", "post_id": post_id})
+        except Exception:  # noqa: BLE001
+            pass
+    return {"ok": True, "post_id": post_id, "provider_post_id": result["post_id"], "status": result["status"]}
 
 
-def _mark_failed(post: Post, message: str) -> None:
-    post.status = "failed"
-    post.error_message = message[:500]
-    post.updated_at = datetime.now(timezone.utc)
-
-
-async def _notify_owner(session, account, post, success: bool, error: str = "") -> None:
-    """Send the owner a Telegram message about the publish result."""
+async def _notify_owner(
+    session, account: InstagramAccount, post: Post, *,
+    success: bool, error: str = "", provider_status: str = "",
+) -> None:
+    """Best-effort Telegram notification; it must never retry publication."""
     from app.services.notifications import notify_telegram
 
     if success:
         text = (
-            f"✅ پست شما منتشر شد\n"
-            f"📌 نوع: {post.kind}\n"
-            f"🔗 لینک: {post.ig_permalink or '—'}"
-        )
-        kind = "publish_success"
+            "✅ انتشار از مسیر Zernio ثبت شد\n" if post.status == "published"
+            else "⏳ درخواست انتشار در Zernio پذیرفته شد؛ وضعیت نهایی را آنجا بررسی کنید.\n"
+        ) + f"📌 نوع: {post.kind}\n🆔 شناسه: {post.ig_media_id or '—'}\nوضعیت: {provider_status}"
+        notification_kind = "publish_success"
     else:
-        text = (
-            f"❌ انتشار پست ناموفق بود\n"
-            f"📌 نوع: {post.kind}\n"
-            f"⚠️ خطا: {error[:300]}"
-        )
-        kind = "publish_failed"
+        text = f"❌ انتشار پست ناموفق یا نامشخص است\n📌 نوع: {post.kind}\n⚠️ {error[:300]}"
+        notification_kind = "publish_failed"
     try:
-        await notify_telegram(session, account.owner_id, text, kind=kind)
+        await notify_telegram(session, account.owner_id, text, kind=notification_kind)
     except Exception:  # noqa: BLE001
         logger.warning("could not notify owner id=%s", account.owner_id)

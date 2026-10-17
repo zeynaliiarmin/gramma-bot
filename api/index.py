@@ -428,9 +428,7 @@ async def diag_env(request: Request):
         "AVALAI_BASE_URL", "AVALAI_MODEL", "CHATBOTX_ENABLED", "CHATBOTX_BASE_URL",
         "CHATBOTX_WORKSPACE_ID", "CHATBOTX_WORKSPACE_TOKEN",
         "CHATBOTX_API_CHANNEL_TOKEN", "RUN_MODE", "CRON_SECRET", "VERCEL",
-        "INSTAGRAM_ACCOUNT_MODE", "ENCRYPTION_KEY",
-        "OPENCLAW_BASE_URL", "OPENCLAW_TOKEN", "OPENCLAW_PUBLISH_TIMEOUT",
-        "BROWSER_USE_API_KEY", "INSTAGRAM_PUBLISH_MIN_INTERVAL_MINUTES",
+        "INSTAGRAM_ACCOUNT_MODE", "ENCRYPTION_KEY", "ZERNIO_API_KEY",
     ]
     return {
         k: ({"set": bool(os.environ.get(k)), "len": len(os.environ.get(k, ""))})

@@ -196,7 +196,7 @@ async def find_matching_scenario(
     return None
 
 
-# ── AI drafting (AvalAI → OpenClaw → fallback text) ───────────
+# ── AI drafting (AvalAI → fallback text) ──────────────────────
 async def draft_automation_reply(text: str, instruction: str, fallback: str) -> str:
     """Draft a reply with AI; degrade gracefully to `fallback`."""
     if not instruction.strip():

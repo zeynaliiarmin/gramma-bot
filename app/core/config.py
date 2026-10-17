@@ -67,20 +67,6 @@ class Settings(BaseSettings):
     openai_base_url: str = ""
     tavily_api_key: str = ""
 
-    # ── OpenClaw AI gateway (local HTTP, Telegram channel disabled) ──
-    # OpenClaw runs on the same server as an HTTP gateway (DeepSeek/AvalAI).
-    # Gramma is the ONLY client — and the ONLY owner of the Telegram token.
-    # OPENCLAW_BASE_URL="" → feature disabled (template fallbacks used).
-    openclaw_base_url: str = "http://127.0.0.1:18789"
-    openclaw_token: str = ""
-    openclaw_timeout: float = 30.0
-    # Browser-automation publishing through the OpenClaw gateway (Browser Use
-    # Cloud). Publishing takes much longer than AI prompts → own timeout.
-    openclaw_publish_timeout: float = 55.0
-    browser_use_api_key: str = ""
-    # Minimum spacing between two Instagram publishes per account (minutes).
-    instagram_publish_min_interval_minutes: int = 30
-
     # ── ChatbotX (Instagram automation via Login with Instagram) ──
     # ChatbotX is the primary messaging automation platform that bypasses
     # Meta App Review / sanctions by using Login with Instagram OAuth.
@@ -92,18 +78,11 @@ class Settings(BaseSettings):
     chatbotx_webhook_secret: str = ""
     chatbotx_enabled: bool = False
 
-    # ── Zernio (separate, admin-only Instagram post drafts/scheduling) ──
-    # The key belongs only in .env / Vercel Environment Variables.
+    # ── Zernio (the only Instagram post-publication provider) ──
+    # Keep credentials in ignored .env / the existing Vercel secret store only.
     zernio_api_key: str = ""
-
-    # ── Instagram Publishing via OpenClaw private-enabled (instagrapi) ──
-    # When enabled, Gramma can publish posts/stories/reels via instagrapi
-    # (private Instagram API) without a Meta app. Risky — must be rate-limited.
-    instagram_publish_enabled: bool = False
-    instagram_publish_daily_limit: int = 3  # max 3 posts/day per page for safety
-    instagram_publish_mode: str = "private-enabled"  # private-enabled | disabled
-    instagram_username: str = ""  # for instagrapi login (stored encrypted in prod)
-    instagram_password: str = ""
+    # The one-shot, POST-only manual real-publication route has its own secret.
+    test_secret: str = ""
 
     # ── Media CDN (optional) ─────────────────────────────────
     s3_bucket: str = ""

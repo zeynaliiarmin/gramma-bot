@@ -339,8 +339,7 @@ async def route_incoming_message(
 
     # 2. Try AI if enabled
     ai_enabled = False
-    # AvalAI is the only AI usable on the serverless webhook runtime
-    # (OpenClaw lives on the user's phone and is unreachable from Vercel).
+    # AvalAI is the AI provider on both webhook and local runtimes.
     if getattr(settings, "avalai_api_key", None):
         ai_enabled = True
 

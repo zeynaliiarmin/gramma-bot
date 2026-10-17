@@ -60,8 +60,8 @@ T = {
         "en": "Post scheduled for {when} ✅",
     },
     "local_media_note": {
-        "fa": "رسانه ذخیره شد. (در حالت دمو، انتشار شبیه‌سازی می‌شود.)",
-        "en": "Media saved. (Demo mode simulates publishing.)",
+        "fa": "رسانه ذخیره شد. انتشار واقعی فقط از مسیر Zernio و با URL عمومی HTTPS امکان‌پذیر است.",
+        "en": "Media saved. Real publication requires a public HTTPS URL and Zernio.",
     },
 }
 

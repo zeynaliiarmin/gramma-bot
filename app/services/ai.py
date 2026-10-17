@@ -49,7 +49,11 @@ def _default_reply(text: str, locale: str | None = None) -> str:
             else "به نظر پیام تبلیغاتی می‌رسد و پاسخی برای آن ارسال نمی‌شود."
         )
     if "?" in text or "؟" in text or re.search(r"\b(question|help)\b", text, re.I):
-        return "Great question — we'll get back to you with the details shortly!"
+        return (
+            "سؤال خوبی است؛ به‌زودی با جزئیات پاسخ می‌دهیم!"
+            if (locale or "").startswith("fa")
+            else "Great question — we'll get back to you with the details shortly!"
+        )
     return thank
 
 
@@ -64,29 +68,17 @@ async def generate_caption(
 ) -> str:
     """Generate a caption.
 
-    Priority: OpenClaw gateway → AvalAI (direct) → built-in template.
-    Any failure degrades gracefully to the next layer; the bot never hangs.
+    Priority: AvalAI (direct) → built-in template.
+    Any failure degrades gracefully to the offline fallback.
     """
-    # 1) OpenClaw (the centralized AI brain)
-    if settings.openclaw_base_url:
-        try:
-            from app.services.openclaw import generate_caption_via_openclaw
-
-            return await generate_caption_via_openclaw(
-                prompt, tone=tone, language=language, hashtags=hashtags,
-                user_id=user_id, account_id=account_id,
-            )
-        except Exception:  # noqa: BLE001 — fall through to next engine
-            pass
-
-    # 2) AvalAI / OpenAI-compatible direct
+    # AvalAI / OpenAI-compatible direct
     if settings.ai_api_key:
         try:
             return await _generate_caption_llm(prompt, tone, language, hashtags)
         except Exception:
             pass
 
-    # 3) Offline template
+    # Offline template
     return _generate_caption_template(prompt, tone, language, hashtags)
 
 
@@ -221,6 +213,69 @@ async def draft_reply(
         return text or None
     except Exception:  # noqa: BLE001
         return _default_reply(incoming_text, locale)
+
+
+async def _short_ai_task(system: str, prompt: str) -> str | None:
+    """Bounded AvalAI request for ideas and insights; never use a gateway."""
+    if not settings.ai_api_key:
+        return None
+    try:
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(
+            api_key=settings.ai_api_key,
+            base_url=settings.ai_base_url or None,
+            timeout=20.0,
+        )
+        response = await client.chat.completions.create(
+            model=settings.ai_model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt[:1800]},
+            ],
+            temperature=0.7,
+        )
+        return (response.choices[0].message.content or "").strip() or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def generate_post_ideas(topic: str, count: int = 5, language: str = "fa") -> str:
+    """Suggest post topics using AvalAI, with a useful offline fallback."""
+    count = max(1, min(count, 10))
+    ideas = await _short_ai_task(
+        f"Suggest exactly {count} distinct Instagram post ideas in {language}. "
+        "Use Latin digits for numbering. Return only the numbered list.",
+        topic,
+    )
+    if ideas:
+        return ideas
+    return (
+        "ایده‌هایی برای شروع:\n"
+        f"1. معرفی موضوع «{topic[:80]}» با یک مثال واقعی\n"
+        "2. پشت‌صحنه کار و فرآیند آماده‌سازی را نشان دهید\n"
+        "3. به سؤال‌های پرتکرار دنبال‌کنندگان پاسخ دهید\n"
+        "4. یک نکته کاربردی را با تصویر یا ویدیو آموزش دهید\n"
+        "5. تجربه و بازخورد مشتریان را به اشتراک بگذارید"
+    )
+
+
+async def analyze_page(metrics: dict, language: str = "fa") -> str:
+    """Summarize page metrics without exposing them to an obsolete gateway."""
+    analysis = await _short_ai_task(
+        f"You are an Instagram growth advisor. Analyze the page metrics in {language}. "
+        "Give three actionable recommendations; use Latin digits, not Gregorian dates.",
+        json.dumps(metrics, ensure_ascii=False, default=str),
+    )
+    if analysis:
+        return analysis
+    return (
+        "تحلیل پایهٔ پیج:\n"
+        f"👥 دنبال‌کننده: {metrics.get('followers', '—')}\n"
+        f"🖼 پست: {metrics.get('media_count', '—')}\n"
+        f"📈 روند: {metrics.get('trend', '—')}\n\n"
+        "پیشنهاد: انتشار منظم و تعامل فعال با کامنت‌ها."
+    )
 
 
 async def stream_captions(prompt: str, count: int, tone: str, language: str) -> AsyncIterator[str]:

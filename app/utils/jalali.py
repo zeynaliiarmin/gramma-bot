@@ -210,7 +210,7 @@ def _fa(value: object, pad: int = 0) -> str:
 
 
 def current_jalali_context() -> dict:
-    """Jalali snapshot for AI prompts (OpenClaw) and reports."""
+    """Jalali snapshot for AI prompts and reports."""
     now = datetime.now(ZoneInfo(settings.timezone))
     jy, jm, jd = to_jalali(now)
     return {

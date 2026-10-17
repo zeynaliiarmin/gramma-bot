@@ -7,8 +7,8 @@ Flow:
   4. user picks "publish now" or "schedule";
   5. a `Post` row is created; the background publisher handles it.
 
-In demo mode everything is persisted and "published" through a simulated
-service so the full loop is testable end-to-end.
+All real publication is delegated to Zernio. Media must have a public HTTPS
+URL; local files without a configured CDN cannot be submitted to Zernio.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from app.db.repositories import (
     get_or_create_user,
 )
 from app.models import Media, Post
-from app.services.media_storage import save_downloaded_media
+from app.services.media_storage import save_downloaded_media, save_downloaded_media_serverless
 
 settings = get_settings()
 router = Router(name="publish")
@@ -91,8 +91,12 @@ async def media_received(message: Message, state: FSMContext):
     caption = (message.caption or "").strip()
     is_video = message.content_type in (ContentType.VIDEO, ContentType.VIDEO_NOTE)
 
-    # Download + store the media locally (in production: upload to S3 CDN).
-    path = await save_downloaded_media(message.bot, message, is_video=is_video)
+    # Zernio needs a public URL: serverless uploads to Supabase Storage,
+    # while local/Docker deployments may use a configured S3-compatible CDN.
+    if settings.run_mode == "webhook" and not settings.s3_bucket:
+        path = await save_downloaded_media_serverless(message.bot, message, is_video=is_video)
+    else:
+        path = await save_downloaded_media(message.bot, message, is_video=is_video)
 
     async with SessionLocal() as session:
         await get_or_create_user(

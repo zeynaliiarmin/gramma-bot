@@ -1,4 +1,4 @@
-"""Gramma — Instagram publishing + community + insights service.
+"""Gramma — Instagram messaging + community + insights service.
 
 Every method receives an `account` row (with an ENCRYPTED token column) and
 decrypts it only at call time. Nothing is ever logged with the raw token.
@@ -10,13 +10,10 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from app.core.security.crypto import get_cipher
-from app.services.meta.client import GraphClient, GraphAPIError, get_client
+from app.services.meta.client import GraphClient, get_client
 
 if TYPE_CHECKING:
     from app.models import InstagramAccount
-
-_MEDIA_PUBLISH_FIELDS = "id,status,permalink,caption,timestamp,media_type,media_url"
-
 
 def _token(account: "InstagramAccount") -> str:
     """Decrypt the account access token (fails loudly if corrupt)."""
@@ -46,82 +43,6 @@ class InstagramService:
             fields="username,name,followers_count,media_count,profile_picture_url",
         )
         return data
-
-    # ── Publishing ────────────────────────────────────────────
-    async def publish_media(
-        self, account: "InstagramAccount", media_url: str, caption: str,
-        is_video: bool = False, is_reel: bool = False, is_story: bool = False,
-    ) -> dict:
-        """Create + publish a single media container (image/video/reel/story)."""
-        token = _token(account)
-        uname = account.username or "demo"
-
-        if not account.instagram_user_id:  # Simulation
-            await asyncio_sleep(0.6)
-            return {"id": f"sim_{int(datetime.now().timestamp())}", "permalink": "https://instagram.com/p/demo"}
-
-        media_type = "STORIES" if is_story else ("REELS" if is_reel else ("VIDEO" if is_video else "IMAGE"))
-        container = await self.client.post(
-            f"/{account.instagram_user_id}/media",
-            token,
-            media_type=media_type,
-            media_url=media_url,
-            caption=caption,
-        )
-        cid = container.get("id")
-        if not cid:
-            raise GraphAPIError(None, "empty_container", f"no container id for {uname}")
-
-        publish = await self.client.post(
-            f"/{account.instagram_user_id}/media_publish",
-            token,
-            creation_id=cid,
-        )
-        await self.client.get(
-            f"/{publish.get('id')}", token, fields=_MEDIA_PUBLISH_FIELDS
-        )
-        return publish
-
-    async def publish_carousel(
-        self, account: "InstagramAccount", children: list[dict], caption: str
-    ) -> dict:
-        """Publish a carousel from already-created child containers.
-
-        `children` is a list like [{"id": "cid1"}, {"id": "cid2"}].
-        """
-        token = _token(account)
-        if not account.instagram_user_id:
-            await asyncio_sleep(0.9)
-            return {"id": f"sim_carousel_{int(datetime.now().timestamp())}", "permalink": "https://instagram.com/p/demo"}
-
-        ordered = [{"id": c["id"]} for c in children]
-        container = await self.client.post(
-            f"/{account.instagram_user_id}/media",
-            token,
-            media_type="CAROUSEL",
-            children=",".join(c["id"] for c in ordered),
-            caption=caption,
-        )
-        cid = container.get("id")
-        if not cid:
-            raise GraphAPIError(None, "empty_container", "no carousel container id")
-        return await self.client.post(
-            f"/{account.instagram_user_id}/media_publish",
-            token, creation_id=cid,
-        )
-
-    async def create_child_container(
-        self, account: "InstagramAccount", media_url: str, is_video: bool = False
-    ) -> dict:
-        """Create one child container for a carousel."""
-        token = _token(account)
-        if not account.instagram_user_id:
-            return {"id": f"sim_child_{int(datetime.now().timestamp())}"}
-        media_type = "VIDEO" if is_video else "IMAGE"
-        return await self.client.post(
-            f"/{account.instagram_user_id}/media",
-            token, is_carousel_item="true", media_type=media_type, media_url=media_url,
-        )
 
     # ── Comments ──────────────────────────────────────────────
     async def list_comments(self, account: "InstagramAccount", media_id: str, limit: int = 25) -> list[dict]:
@@ -198,9 +119,3 @@ class InstagramService:
             f"/{account.instagram_user_id}/insights", _token(account),
             metric=metric, period=period,
         )
-
-
-async def asyncio_sleep(seconds: float) -> None:
-    import asyncio
-
-    await asyncio.sleep(seconds)

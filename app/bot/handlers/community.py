@@ -66,9 +66,8 @@ async def cb_comments(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("comment:suggest:"))
 async def cb_comment_suggest(callback: CallbackQuery):
-    """AI-suggested reply to a comment — routed through OpenClaw (fallback).
-    """
-    from app.services.openclaw import OpenClawError, suggest_comment_reply
+    """Suggest a Persian comment reply using AvalAI or a safe template."""
+    from app.services.ai import draft_reply
 
     comment_id = callback.data.split(":", 2)[2]
     await callback.answer("در حال تولید پیشنهاد…")
@@ -94,16 +93,10 @@ async def cb_comment_suggest(callback: CallbackQuery):
         )
         return
 
-    try:
-        suggestion = await suggest_comment_reply(
-            comment_text,
-            username=username,
-            language="fa",
-            user_id=callback.from_user.id,
-            account_id=account.id if account else None,
-        )
-    except OpenClawError:
-        suggestion = _template_comment_reply(comment_text)
+    suggestion = await draft_reply(
+        f"نظر از {username}: {comment_text}" if username else comment_text,
+        locale="fa",
+    ) or _template_comment_reply(comment_text)
 
     await callback.message.edit_text(
         f"🎯 <b>پیشنهاد پاسخ هوشمند:</b>\n\n{suggestion}\n\n"

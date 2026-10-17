@@ -30,6 +30,24 @@ settings = get_settings()
 router = Router(name="schedule")
 
 
+async def _zernio_queue_error(session, post: Post, user_id: int) -> str | None:
+    """Reject unsupported/unsafe queued posts before announcing publication."""
+    from sqlalchemy import select
+    from app.models import InstagramAccount
+
+    account = await session.get(InstagramAccount, post.account_id)
+    if account is None or account.owner_id != user_id:
+        return tr(None, "account_not_found")
+    if user_id not in settings.admin_ids or account.status != "connected":
+        return "انتشار فقط برای پیج متصلِ مدیر از مسیر Zernio مجاز است."
+    if post.status != "draft":
+        return "این پست قبلاً ثبت شده است؛ برای انتشار دوباره پست جدید بسازید."
+    urls = (await session.execute(select(Media.url).where(Media.post_id == post.id))).scalars().all()
+    if not urls or any(not url.startswith("https://") for url in urls):
+        return "رسانه باید URL عمومی HTTPS داشته باشد؛ فایل محلی قابل انتشار نیست."
+    return None
+
+
 @router.callback_query(F.data == "schedule:now")
 async def cb_schedule_now(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -44,12 +62,9 @@ async def cb_schedule_now(callback: CallbackQuery, state: FSMContext):
             await callback.message.edit_text(tr(None, "something_wrong"))
             await callback.answer()
             return
-        # Ownership re-check: post must belong to this user's account.
-        from app.models import InstagramAccount
-
-        acc = await session.get(InstagramAccount, post.account_id)
-        if acc is None or acc.owner_id != callback.from_user.id:
-            await callback.message.edit_text(tr(None, "account_not_found"))
+        error = await _zernio_queue_error(session, post, callback.from_user.id)
+        if error:
+            await callback.message.edit_text(error)
             await callback.answer()
             return
 
@@ -98,7 +113,7 @@ async def time_received(message: Message, state: FSMContext):
     if dt is None:
         await message.answer(
             "⚠️ قالب نامعتبر است. مثال: 1405/06/30 14:30\n"
-            "یا بنویسید: فردا صبح، شنبه ساعت 10، ۲ ساعت بعد"
+            "یا بنویسید: فردا صبح، شنبه ساعت 10، 2 ساعت بعد"
         )
         return
     data = await state.get_data()
@@ -126,6 +141,11 @@ async def _finalize_schedule(update_obj, state: FSMContext, post_id, dt_utc: dat
         post = await session.get(Post, post_id)
         if post is None:
             await reply(tr(None, "something_wrong"))
+            await state.clear()
+            return
+        error = await _zernio_queue_error(session, post, update_obj.from_user.id)
+        if error:
+            await reply(error)
             await state.clear()
             return
         post.status = "scheduled"
@@ -184,7 +204,7 @@ async def _show_schedule(callback: CallbackQuery, page: int):
             return
         result = await session.execute(
             select(Post)
-            .where(Post.account_id.in_(ids), Post.status.in_(["scheduled", "failed"]))
+            .where(Post.account_id.in_(ids), Post.status.in_(["scheduled", "publishing", "failed"]))
             .order_by(Post.scheduled_at)
         )
         posts = result.scalars().all()
@@ -192,7 +212,7 @@ async def _show_schedule(callback: CallbackQuery, page: int):
     items = []
     for p in posts:
         when = jalali.to_jalali_str(p.scheduled_at) if p.scheduled_at else "—"
-        mark = "⏳" if p.status == "scheduled" else "❌"
+        mark = "⏳" if p.status in ("scheduled", "publishing") else "❌"
         items.append((f"{mark} {p.kind} — {when} — {p.caption[:24]}", f"schedule:view:{p.id}"))
 
     if not items:
@@ -231,7 +251,7 @@ async def cb_schedule_view(callback: CallbackQuery):
                 _select(func.count()).where(Media.post_id == post.id)
             )
         ).scalar() or 0
-        status_icon = {"scheduled": "⏳", "failed": "❌", "published": "✅"}.get(post.status, "•")
+        status_icon = {"scheduled": "⏳", "publishing": "⏳", "failed": "❌", "published": "✅"}.get(post.status, "•")
         text = (
             f"{status_icon} <b>جزئیات پست</b>\n"
             f"نوع: {post.kind}\n"
