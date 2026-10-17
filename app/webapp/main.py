@@ -270,6 +270,12 @@ async def api_calendar(
         ids = [a.id for a in accounts]
         days = await build_calendar(session, ident.user_id, ids) if ids else []
     if ident.user_id in settings.admin_ids:
+        # Keep genuine scheduled legacy Post rows alongside the new queue.
+        for day in days:
+            day["posts"] = [{**post, "source": "legacy", "legacy_id": post["id"],
+                              "when_jalali": day["date"].replace("-", "/") + " " + post["at"]}
+                             for post in day["posts"] if post["status"] == "scheduled"]
+        days = [day for day in days if day["posts"]]
         buckets = {day["date"]: day for day in days}
         for job in await list_scheduled_posts(ident.user_id, limit=40):
             jy, jm, jd = jalali.to_jalali(job["scheduled_for"])
@@ -302,7 +308,7 @@ async def api_telegram_schedule_current(
 ):
     """Read only: auth+ownership guard for this exact draft/queued Telegram post."""
     from app.services.telegram_post_drafts import TelegramDraftError, get_owned_draft
-    from app.services.telegram_scheduling import get_owned_scheduled_post
+    from app.services.telegram_scheduling import get_owned_legacy_scheduled_post, get_owned_scheduled_post
 
     if ident.user_id not in settings.admin_ids or item < 1:
         return JSONResponse(status_code=403, content={"detail": "دسترسی ندارید."})
@@ -322,6 +328,12 @@ async def api_telegram_schedule_current(
             chosen = job["scheduled_for"]
             caption = job["payload"].get("caption")
             kind = "پستِ در صف"
+        elif target == "legacy":
+            async with SessionLocal() as session:
+                post = await get_owned_legacy_scheduled_post(session, item, ident.user_id)
+                if not post:
+                    return JSONResponse(status_code=409, content={"detail": "پست قدیمی دیگر زمان‌بندی‌شده نیست."})
+                chosen, caption, kind = post.scheduled_at, post.caption, "پستِ زمان‌بندی‌شدهٔ قدیمی"
         else:
             return JSONResponse(status_code=400, content={"detail": "نوع زمان‌بندی نامعتبر است."})
         return {"target": target, "item": item, "kind": kind,
@@ -338,25 +350,28 @@ async def api_telegram_schedule_choose(
     """Save Tehran/Jalali selection; NEVER insert a queue job or publish."""
     from app.services.telegram_post_drafts import TelegramDraftError
     from app.services.telegram_scheduling import (
-        ScheduleError, jalali_choice, set_draft_schedule, set_queue_schedule,
+        ScheduleError, jalali_choice, set_draft_schedule, set_legacy_schedule,
+        set_queue_schedule,
     )
 
     if ident.user_id not in settings.admin_ids:
         return JSONResponse(status_code=403, content={"detail": "فقط مدیر مجاز است."})
     target, item = body.get("target"), body.get("item")
     fields = [body.get(name) for name in ("year", "month", "day", "hour", "minute")]
-    if target not in ("draft", "queue") or type(item) is not int or item < 1 or any(type(v) is not int for v in fields):
+    if target not in ("draft", "queue", "legacy") or type(item) is not int or item < 1 or any(type(v) is not int for v in fields):
         return JSONResponse(status_code=400, content={"detail": "تاریخ یا پیش‌نویس معتبر نیست."})
     try:
         when = jalali_choice(*fields)
         if target == "draft":
             saved = await set_draft_schedule(item, ident.user_id, when)
-        else:
+        elif target == "queue":
             saved = await set_queue_schedule(item, ident.user_id, when)
+        else:
+            saved = await set_legacy_schedule(item, ident.user_id, when)
         return {"ok": True, "scheduled_jalali": saved["jalali"],
-                "queued": target == "queue",
-                "message": ("زمان صفِ موجود تغییر کرد؛ پست تازه‌ای ساخته نشد."
-                            if target == "queue" else
+                "queued": target != "draft",
+                "message": ("زمان پستِ موجود تغییر کرد؛ پست تازه‌ای ساخته نشد."
+                            if target != "draft" else
                             "زمان در پیش‌نویس ذخیره شد؛ برای صف‌گذاری به تلگرام برگردید و «تأیید نهایی» را بزنید.")}
     except (ScheduleError, TelegramDraftError) as exc:
         return JSONResponse(status_code=409, content={"detail": str(exc)})
@@ -367,16 +382,20 @@ async def api_telegram_schedule_caption(
     body: dict, ident: MiniAppIdentity = Depends(resolve_miniapp_user),
 ):
     """Edit ONLY a pending owned Telegram queue row; no provider call."""
-    from app.services.telegram_scheduling import ScheduleError, update_queue_caption
+    from app.services.telegram_scheduling import ScheduleError, update_legacy_caption, update_queue_caption
 
     if ident.user_id not in settings.admin_ids:
         return JSONResponse(status_code=403, content={"detail": "فقط مدیر مجاز است."})
     item, kind, value = body.get("item"), body.get("kind"), body.get("value")
-    if (type(item) is not int or item < 1 or kind not in ("caption", "visible", "comment")
+    target = body.get("target", "queue")
+    if (type(item) is not int or item < 1 or target not in ("queue", "legacy")
+            or kind not in ("caption", "visible", "comment")
+            or (target == "legacy" and kind != "caption")
             or not isinstance(value, str) or len(value) > 2200):
-        return JSONResponse(status_code=400, content={"detail": "متن کپشن یا شناسهٔ صف معتبر نیست."})
+        return JSONResponse(status_code=400, content={"detail": "متن کپشن یا شناسهٔ پست معتبر نیست."})
     try:
-        saved = await update_queue_caption(item, ident.user_id, kind=kind, value=value)
+        saved = (await update_legacy_caption(item, ident.user_id, value) if target == "legacy"
+                 else await update_queue_caption(item, ident.user_id, kind=kind, value=value))
         return {"ok": True, "scheduled_jalali": saved["jalali"]}
     except ScheduleError as exc:
         return JSONResponse(status_code=409, content={"detail": str(exc)})

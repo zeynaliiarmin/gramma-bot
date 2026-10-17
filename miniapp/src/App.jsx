@@ -39,7 +39,7 @@ export default function App() {
     const params = new URLSearchParams(window.location.search)
     const target = params.get('schedule')
     const item = Number(params.get('item'))
-    return (['draft', 'queue'].includes(target) && Number.isSafeInteger(item) && item > 0)
+    return (['draft', 'queue', 'legacy'].includes(target) && Number.isSafeInteger(item) && item > 0)
       ? { target, item } : null
   })
 

@@ -14,8 +14,8 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.services.telegram_post_drafts import get_owned_draft
 from app.services.telegram_scheduling import (
-    ScheduleError, get_owned_scheduled_post, jalali_choice,
-    set_draft_schedule, set_queue_schedule,
+    ScheduleError, get_owned_legacy_scheduled_post, get_owned_scheduled_post,
+    jalali_choice, set_draft_schedule, set_legacy_schedule, set_queue_schedule,
 )
 from app.utils import jalali
 
@@ -79,8 +79,9 @@ def _month_keyboard(target: str, item_id: int, year: int, month: int) -> InlineK
             else:
                 week.append(_button(" ", "tcal:noop"))
         rows.append(week)
-    rows.append([_button("◀ بازگشت به تنظیمات", f"td:{item_id}:back" if target == "d"
-                         else f"calendar:post:{item_id}")])
+    back_to = (f"td:{item_id}:back" if target == "d" else
+               f"calendar:legacy:{item_id}" if target == "l" else f"calendar:post:{item_id}")
+    rows.append([_button("◀ بازگشت به تنظیمات", back_to)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -112,6 +113,12 @@ async def _guard(target: str, item_id: int, owner_id: int, panel_id: int) -> Non
             job = await get_owned_scheduled_post(session, item_id, owner_id)
         if not job or job["status"] != "pending" or job["scheduled_for"] <= datetime.now(timezone.utc) + timedelta(minutes=5):
             raise ScheduleError("زمان این پست دیگر قابل ویرایش نیست.")
+    elif target == "l":
+        async with SessionLocal() as session:
+            post = await get_owned_legacy_scheduled_post(session, item_id, owner_id)
+            when = post.scheduled_at if post else None
+        if not when or when <= datetime.now(timezone.utc) + timedelta(minutes=5):
+            raise ScheduleError("پست قدیمی دیگر قابل ویرایش نیست.")
     else:
         raise ScheduleError("نوع تقویم معتبر نیست.")
 
@@ -131,7 +138,7 @@ async def inline_calendar(callback: CallbackQuery) -> None:
     await callback.answer()
     parts = (callback.data or "").split(":")
     try:
-        if (len(parts) < 4 or parts[1] not in ("d", "q") or not parts[2].isdigit()
+        if (len(parts) < 4 or parts[1] not in ("d", "q", "l") or not parts[2].isdigit()
                 or parts[3] not in ("m", "d", "h", "s")
                 or any(not value.isdigit() for value in parts[4:])):
             raise ScheduleError("دکمهٔ تقویم معتبر نیست.")
@@ -171,11 +178,16 @@ async def inline_calendar(callback: CallbackQuery) -> None:
 
                 draft = await get_owned_draft(item_id, callback.from_user.id, callback.from_user.id)
                 await callback.message.edit_text(_panel_text(draft), reply_markup=_panel_keyboard(draft))
-            else:
+            elif target == "q":
                 await set_queue_schedule(item_id, callback.from_user.id, when)
                 from app.bot.handlers.calendar import show_queue_detail
 
                 await show_queue_detail(callback, item_id)
+            else:
+                await set_legacy_schedule(item_id, callback.from_user.id, when)
+                from app.bot.handlers.calendar import show_legacy_detail
+
+                await show_legacy_detail(callback, item_id)
             return
         else:
             raise ScheduleError("دکمهٔ تقویم معتبر نیست.")

@@ -15,7 +15,7 @@ from sqlalchemy import select, text
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.models import InstagramAccount, TelegramPostDraft
+from app.models import InstagramAccount, Post, TelegramPostDraft
 from app.services.instagram_options import (
     InstagramOptionError, validate_instagram_caption, validate_instagram_options,
 )
@@ -253,3 +253,57 @@ async def update_queue_caption(queue_id: int, owner_id: int, *, kind: str,
         await session.commit()
         return {"id": queue_id, "payload": payload,
                 "jalali": jalali.to_jalali_str(row["scheduled_for"])}
+
+
+async def get_owned_legacy_scheduled_post(session, post_id: int, owner_id: int, *, lock: bool = False):
+    """Legacy Post is scheduled, owned, and has not been claimed by its own sweep."""
+    _admin(owner_id)
+    stmt = (select(Post).join(InstagramAccount, Post.account_id == InstagramAccount.id)
+            .where(Post.id == post_id, InstagramAccount.owner_id == owner_id,
+                   Post.status == "scheduled", Post.scheduled_at.is_not(None)))
+    if lock:
+        stmt = stmt.with_for_update(of=Post)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def list_legacy_scheduled_posts(owner_id: int, *, limit: int = 10, offset: int = 0) -> list[dict]:
+    _admin(owner_id)
+    async with SessionLocal() as session:
+        rows = (await session.execute(
+            select(Post).join(InstagramAccount, Post.account_id == InstagramAccount.id)
+            .where(InstagramAccount.owner_id == owner_id, Post.status == "scheduled",
+                   Post.scheduled_at.is_not(None))
+            .order_by(Post.scheduled_at.asc(), Post.id.asc())
+            .limit(min(max(limit, 1), 25)).offset(max(offset, 0))
+        )).scalars().all()
+        return [{"id": p.id, "kind": p.kind, "caption": p.caption or "",
+                 "scheduled_at": p.scheduled_at} for p in rows]
+
+
+async def set_legacy_schedule(post_id: int, owner_id: int, when: datetime) -> dict:
+    """Same time/ownership/row-lock guard for the older scheduled-post path."""
+    _admin(owner_id)
+    when = _valid_target(when)
+    async with SessionLocal() as session:
+        async with session.begin():
+            post = await get_owned_legacy_scheduled_post(session, post_id, owner_id, lock=True)
+            if not post or post.scheduled_at < _now() + timedelta(seconds=TELEGRAM_SCHEDULE_MIN_LEAD_SECONDS):
+                raise ScheduleError("پست قدیمی قابل ویرایش نیست؛ وضعیت و نوبت انتشار را بررسی کنید.")
+            post.scheduled_at = when
+    return {"id": post_id, "jalali": jalali.to_jalali_str(when)}
+
+
+async def update_legacy_caption(post_id: int, owner_id: int, value: str) -> dict:
+    _admin(owner_id)
+    if not isinstance(value, str) or len(value) > 2200:
+        raise ScheduleError("طول کپشن معتبر نیست (حداکثر 2200 نویسه).")
+    async with SessionLocal() as session:
+        async with session.begin():
+            post = await get_owned_legacy_scheduled_post(session, post_id, owner_id, lock=True)
+            if not post or post.scheduled_at < _now() + timedelta(seconds=TELEGRAM_SCHEDULE_MIN_LEAD_SECONDS):
+                raise ScheduleError("پست قدیمی قابل ویرایش نیست؛ وضعیت و نوبت انتشار را بررسی کنید.")
+            if post.kind != "story" and not value.strip():
+                raise ScheduleError("کپشن پست قدیمی باید متن غیرخالی داشته باشد.")
+            post.caption = value.strip()
+            when = post.scheduled_at
+    return {"id": post_id, "jalali": jalali.to_jalali_str(when)}

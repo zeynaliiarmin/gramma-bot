@@ -104,8 +104,8 @@ export default function Calendar() {
 
   function openTimePicker(post) {
     const url = new URL(window.location.href)
-    url.searchParams.set('schedule', 'queue')
-    url.searchParams.set('item', String(post.queue_id))
+    url.searchParams.set('schedule', post.legacy_id ? 'legacy' : 'queue')
+    url.searchParams.set('item', String(post.queue_id || post.legacy_id))
     window.location.assign(url.toString())
   }
 
@@ -114,10 +114,11 @@ export default function Calendar() {
     setNotice('')
     try {
       await api('/api/telegram-schedule/edit-caption', {
-        method: 'POST', body: { item: post.queue_id, kind, value },
+        method: 'POST', body: { target: post.legacy_id ? 'legacy' : 'queue',
+          item: post.queue_id || post.legacy_id, kind, value },
       })
       await load()
-      setNotice('✅ کپشن در صفِ هنوز در انتظار ذخیره شد؛ انتشار تازه‌ای انجام نشد.')
+      setNotice('✅ کپشن پست زمان‌بندی‌شده ذخیره شد؛ انتشار تازه‌ای انجام نشد.')
     } catch (exc) {
       setNotice('⚠️ ' + exc.message)
     } finally {
@@ -182,7 +183,7 @@ export default function Calendar() {
         <p>کپشن روی پست: {expanded.moved ? (expanded.visible_caption || 'خالی') : (expanded.caption || '—')}</p>
         {expanded.moved && <p>کپشن اصلی در اولین کامنت: {expanded.first_comment || '—'}<br />
           <small>برای درج کامنت، اتصال Zernio به مجوز comments نیاز دارد.</small></p>}
-        {expanded.queue_id ? <>
+        {(expanded.queue_id || expanded.legacy_id) ? <>
           <h4>✏️ ویرایش</h4>
           <button className="btn btn-sm" type="button" onClick={() => openTimePicker(expanded)}>
             ⏰ تغییر زمان (تقویم شمسی)
@@ -212,7 +213,7 @@ export default function Calendar() {
           </p>
           {notice && <div role="status" className="banner">{notice}</div>}
         </> : <p style={{ fontSize: 11, color: 'var(--muted)' }}>
-          این مورد از مسیر زمان‌بندی قدیمی است؛ ویرایش صف جدید فقط برای پست‌های تلگرام/Zernio فعال است.
+          این مورد در حال حاضر قابل ویرایش نیست؛ وضعیت انتشار را از تلگرام بررسی کنید.
         </p>}
       </div>}
     </>
