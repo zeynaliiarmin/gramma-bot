@@ -97,7 +97,7 @@ async def cleanup_one_confirmed_media(action_type: str) -> dict:
              WHERE provider = 'zernio' AND action_type = :kind AND status = 'sent'
                AND payload->>'provider_status' = 'published'
                AND payload->>'origin' IN
-                   ('telegram_photo','telegram_video','telegram_album','telegram_story')
+                   ('telegram_photo','telegram_video','telegram_album','telegram_story','scheduled_post')
                AND payload->>'storage_cleanup_done' IS DISTINCT FROM 'true'
                AND payload->>'storage_cleanup_skipped' IS DISTINCT FROM 'true'
                AND (NOT (payload ? 'storage_cleanup_claimed_at') OR
