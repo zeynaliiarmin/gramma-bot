@@ -274,6 +274,7 @@ async def cron_trigger(job: str, request: Request):
       * process-comment-queue     — drain the legacy Meta comment queue (every 5 min)
       * auto-replies              — ChatbotX inbox worker (separate approved pg_cron)
       * knowledge-sync            — read-only Instagram history sweep (nightly)
+      * hold-review               — DB-only expiry sweep of held replies (nightly)
       * check-instagram-health    — probe connected pages (every 10 min)
       * reset-daily-counters      — reports today's counters (00:00)
       * daily-report              — 23:59 Tehran admin report + alerts
@@ -281,9 +282,9 @@ async def cron_trigger(job: str, request: Request):
     Guarded by the shared CRON_SECRET (sent as ``X-Cron-Secret``).
     """
     cron_secret = get_settings().cron_secret
-    # Unlike legacy cron routes, BOTH protected jobs must NEVER run when
-    # CRON_SECRET is missing. Neither accepts GET.
-    if job in ("outbound-post", "outbound-story", "telegram-albums", "auto-replies", "knowledge-sync") and not cron_secret:
+    # Protected jobs must NEVER run when CRON_SECRET is missing; all are POST-only.
+    if job in ("outbound-post", "outbound-story", "telegram-albums", "auto-replies",
+               "knowledge-sync", "hold-review") and not cron_secret:
         return Response(status_code=503, content="cron secret not configured")
     if cron_secret:
         provided = request.headers.get("X-Cron-Secret", "")
@@ -305,6 +306,18 @@ async def cron_trigger(job: str, request: Request):
         except Exception:  # noqa: BLE001
             logger.exception("auto-reply worker failed; uncertain sends are never replayed")
             return Response(status_code=500, content='{"ok":false,"retry_safe":false}')
+
+    if job == "hold-review":
+        if request.method != "POST":
+            return Response(status_code=405, content="POST required")
+        from app.services.auto_reply_queue import review_held_replies_nightly
+
+        try:
+            result = await review_held_replies_nightly()  # DB-only, no send
+            return {"ok": result["state"] == "ok", **result}
+        except Exception as exc:  # noqa: BLE001
+            logger.error("hold review failed type=%s; no outbound attempted", type(exc).__name__)
+            return Response(status_code=500, content='{"ok":false}')
 
     if job == "knowledge-sync":
         if request.method != "POST":

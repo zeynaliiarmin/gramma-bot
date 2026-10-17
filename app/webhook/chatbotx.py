@@ -93,6 +93,12 @@ def _extract_message(payload: dict) -> dict:
         kind = "comment"
     elif kind in ("story_reply", "story_mention"):
         pass
+    elif "story_reply" in event or "story.reply" in event:
+        kind = "story_reply"
+    elif "story_mention" in event or "story.mention" in event:
+        kind = "story_mention"
+    elif _dict(_dict(message.get("reply_to") or message.get("replyTo")).get("story")).get("id"):
+        kind = "story_reply"
     else:
         kind = "dm"
     text = (
@@ -114,7 +120,16 @@ def _extract_message(payload: dict) -> dict:
     peer_id = _string(contact.get("instagram_scoped_user_id") or contact.get("ig_scoped_user_id")
                       or sender.get("instagram_scoped_user_id") or sender.get("ig_scoped_user_id"), 128)
     recorded_at = datetime.now(timezone.utc)
-    stamp = message.get("createdAt") or message.get("created_at") or data.get("timestamp")
+    # For a comment, an event-delivery timestamp does not prove when the
+    # *comment* was created. Require an explicit comment/message creation field.
+    if kind == "comment":
+        stamp = (comment.get("createdAt") or comment.get("created_at")
+                 or comment.get("created_time") or data.get("comment_created_at")
+                 or message.get("createdAt") or message.get("created_at"))
+    else:
+        stamp = (message.get("createdAt") or message.get("created_at")
+                 or data.get("createdAt") or data.get("timestamp"))
+    timestamp_verified = False
     try:
         if isinstance(stamp, str):
             observed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
@@ -123,9 +138,16 @@ def _extract_message(payload: dict) -> dict:
         else:
             observed = None
         if observed and observed.tzinfo and (recorded_at - timedelta(days=30)) <= observed <= recorded_at:
-            recorded_at = observed
+            recorded_at, timestamp_verified = observed, True
     except (ValueError, OverflowError, OSError):
         pass
+    media = _dict(data.get("media"))
+    live_comment = kind == "comment" and (
+        "live_comment" in event or "live.comment" in event
+        or "live_comment" in raw_kind
+        or data.get("is_live") is True or comment.get("is_live") is True
+        or _string(media.get("media_product_type"), 24).lower() == "live"
+    )
     # Only explicit, authenticated provider attribution may suppress our LLM.
     automation_claimed = bool(data.get("automation_id") or data.get("automationId")
                               or data.get("flow_id") or data.get("flowId")
@@ -141,7 +163,9 @@ def _extract_message(payload: dict) -> dict:
         "channel_name": channel_name,
         "message_id": message_id,
         "context": {"post_id": post_id, "comment_id": comment_id,
-                    "instagram_peer_id": peer_id, "automation_claimed": automation_claimed},
+                    "instagram_peer_id": peer_id, "automation_claimed": automation_claimed,
+                    "inbound_timestamp_verified": timestamp_verified,
+                    "live_comment": bool(live_comment)},
     }
 
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 import httpx
@@ -20,6 +20,7 @@ import httpx
 from app.core.config import get_settings
 from app.models import InboxMessage, InstagramAccount
 from app.services.chatbotx_service import ChatbotXClient, ChatbotXError
+from app.services.reply_windows import automatic_reply_window_reason
 from app.services.zernio_publishing import ZernioPublisher, normalize_username
 
 logger = logging.getLogger("gramma.messaging")
@@ -139,10 +140,10 @@ async def _zernio_fallback(account: InstagramAccount, inbox: InboxMessage, text:
             base_url=ZERNIO_BASE, headers=headers, timeout=8.0, follow_redirects=False
         ) as client:
             peer_id = str(inbox.context.get("instagram_peer_id") or "")
-            if inbox.channel == "comment" and not peer_id:
-                # ChatbotX's conversation send is PRIVATE. Never silently
-                # substitute a PUBLIC comment reply. The Zernio comment-to-DM
-                # endpoint is private and requires exact platform IDs.
+            if inbox.channel == "comment":
+                # A comment alone does NOT authorize a normal DM by peer ID.
+                # This route is one private reply with exact post/comment IDs,
+                # never a public reply or a guessed conversation mapping.
                 post_id = str(inbox.context.get("post_id") or "")
                 comment_id = str(inbox.context.get("comment_id") or "")
                 if not (post_id and comment_id and len(post_id) <= 128 and len(comment_id) <= 128):
@@ -156,6 +157,10 @@ async def _zernio_fallback(account: InstagramAccount, inbox: InboxMessage, text:
                 path = f"/v1/inbox/conversations/{quote(conversation_id, safe='')}/messages"
                 body = {"accountId": account_id, "message": text}
                 post_headers = {"Idempotency-Key": idempotency_key}
+            # Recheck after lookup and immediately before this provider POST.
+            reason = automatic_reply_window_reason(inbox, datetime.now(timezone.utc))
+            if reason:
+                return DeliveryOutcome("failed", reason=reason)
             # Exactly ONE POST. No SDK retries, no fallback retry after timeout.
             response = await client.post(path, json=body, headers=post_headers)
     except FallbackUnavailable:
@@ -178,6 +183,19 @@ async def _zernio_fallback(account: InstagramAccount, inbox: InboxMessage, text:
     return DeliveryOutcome("unknown", reason=f"zernio_http_{response.status_code}_ambiguous")
 
 
+async def _deliver_zernio_safely(account: InstagramAccount, inbox: InboxMessage,
+                                 text: str) -> DeliveryOutcome:
+    try:
+        return await _zernio_fallback(account, inbox, text)
+    except FallbackUnavailable as exc:
+        logger.warning("Zernio fallback unavailable account=%s inbox=%s code=%s",
+                       account.id, inbox.id, exc.code)
+        return DeliveryOutcome("failed", reason=exc.code)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Zernio fallback uncertain: %s", type(exc).__name__)
+        return DeliveryOutcome("unknown", reason="zernio_delivery_ambiguous")
+
+
 async def deliver_auto_reply(
     account: InstagramAccount, inbox: InboxMessage, text: str, *, allow_fallback: bool = False
 ) -> DeliveryOutcome:
@@ -186,13 +204,18 @@ async def deliver_auto_reply(
     The caller must first reserve a per-page slot. Never call from the manual
     Mini-App send endpoint (which is intentionally outside the auto budget).
     """
-    if not text or not text.strip() or len(text) > 2000 or not account or not inbox.conversation_id:
+    if not text or not text.strip() or len(text) > 2000 or not account or not inbox:
         return DeliveryOutcome("failed", reason="invalid_auto_reply")
-    received = inbox.received_at or inbox.created_at
-    if received.tzinfo is None:
-        received = received.replace(tzinfo=timezone.utc)
-    if datetime.now(timezone.utc) >= received + timedelta(hours=24) - timedelta(minutes=5):
-        return DeliveryOutcome("failed", reason="reply_window_expired")
+    reason = automatic_reply_window_reason(inbox, datetime.now(timezone.utc))
+    if reason:
+        return DeliveryOutcome("failed", reason=reason)
+    if not inbox.conversation_id:
+        if (inbox.channel == "comment" and allow_fallback
+                and get_settings().auto_reply_worker_enabled):
+            # With no ChatbotX conversation, only an exact Zernio private
+            # comment reply may be attempted. No public comment is posted.
+            return await _deliver_zernio_safely(account, inbox, text)
+        return DeliveryOutcome("failed", reason="invalid_auto_reply")
     client = ChatbotXClient(timeout=8.0)
     try:
         returned = await client.send_message(inbox.conversation_id, text)
@@ -213,15 +236,7 @@ async def deliver_auto_reply(
     # Only the approved Worker with a verified mapping may use Zernio fallback.
     if not allow_fallback or not get_settings().auto_reply_worker_enabled:
         return DeliveryOutcome("failed", reason="chatbotx_rejected_fallback_inactive")
-    try:
-        return await _zernio_fallback(account, inbox, text)
-    except FallbackUnavailable as exc:
-        logger.warning("Zernio fallback unavailable account=%s inbox=%s code=%s",
-                       account.id, inbox.id, exc.code)
-        return DeliveryOutcome("failed", reason=exc.code)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Zernio fallback uncertain: %s", type(exc).__name__)
-        return DeliveryOutcome("unknown", reason="zernio_delivery_ambiguous")
+    return await _deliver_zernio_safely(account, inbox, text)
 
 
 async def alert_admin(*, page: str, inbox_id: int, reason: str, ambiguous: bool = False) -> None:

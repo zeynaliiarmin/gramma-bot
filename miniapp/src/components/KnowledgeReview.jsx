@@ -1,10 +1,19 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 
-const channelNames = { dm: 'دایرکت', comment: 'کامنت', story_reply: 'ریپلای استوری' }
+const channelNames = { dm: 'دایرکت', comment: 'کامنت', story_reply: 'ریپلای استوری', story_mention: 'منشن استوری' }
 const reasons = {
-  reply_window_expired: 'پنجره مجاز 24 ساعته تمام شده؛ ارسال خودکار ممنوع است.',
+  reply_window_expired: 'مهلت 24 ساعته دایرکت/استوری تمام شده؛ ارسال خودکار ممنوع است.',
+  comment_window_expired: 'مهلت 7 روزهٔ پاسخ خصوصی به کامنت تمام شده است.',
+  live_comment_unverified: 'فعال‌بودن پخش زنده قابل اثبات نیست؛ پاسخ خودکار داده نشد.',
+  inbound_time_unverified: 'زمان اصلی پیام/کامنت از ارائه‌دهنده قابل تأیید نبود.',
+  comment_context_unverified: 'شناسهٔ کامنت برای پاسخ خصوصی معتبر در دسترس نیست.',
+  llm_retry_exhausted: 'تلاشِ یک‌بارهٔ موعد Hold نیز بی‌پاسخ ماند.',
+  hold_retry_interrupted: 'تلاش موعد Hold ناتمام ماند؛ برای جلوگیری از تکرار نیاز به بررسی دارد.',
+  hold_retry_exhausted: 'تعداد تلاش‌های Hold تمام شده است.',
+  superseded_by_new_inbound: 'پیام تازه‌تری در این گفتگو آمده؛ پاسخ قدیمی خودکار فرستاده نشد.',
   owner_fact_required: 'پاسخ درباره اطلاعات کسب‌وکار به تأیید شما نیاز دارد.',
+  personal_answer_required: 'درخواست شخصی است؛ پاسخ مشتری دیگری بازاستفاده نمی‌شود.',
   llm_needs_human: 'پاسخ مطمئن بر اساس دانش تأییدشده پیدا نشد.',
   automation_managed: 'برای این پیام یک اتوماسیون تعریف شده؛ LLM کنار گذاشته شد.',
   llm_unavailable: 'مدل رایگان معتبر پاسخ نداده؛ تا نوبت فردا نگه داشته شده است.',
@@ -158,8 +167,9 @@ export default function KnowledgeReview() {
       <div className="card">
         <h3>⏳ Hold و نیاز به بررسی دستی</h3>
         <p style={{ fontSize: 12, lineHeight: 1.9, color: 'var(--muted)' }}>
-          کمبود مدل رایگان، پیام را تا ساعت 13:00 روز بعد تهران نگه می‌دارد. اگر پنجرهٔ 24 ساعته تمام شده باشد،
-          سیستم دیگر خودکار نمی‌فرستد؛ خودتان در اینستاگرام تصمیم بگیرید. دکمهٔ «ثبت بررسی» هیچ پیامی ارسال نمی‌کند.
+          کمبود مدل رایگان پیام را تا ساعت 13:00 روز بعد تهران نگه می‌دارد. پیام‌های تازهٔ امروز زودتر از Hold بررسی می‌شوند؛
+          Hold تنها با سهمیهٔ باقیمانده یک بار تلاش می‌کند. مهلت دایرکت/استوری 24 ساعت و پاسخ خصوصی کامنت 7 روز است؛
+          پس از انقضا فقط شما تصمیم می‌گیرید. دکمهٔ «ثبت بررسی» هیچ پیامی ارسال نمی‌کند.
         </p>
         {!data.held?.length && !data.manual_review?.length && <div className="empty">پیام معلق یا نیازمند بررسی ندارید.</div>}
         {(data.held || []).map((item) => <div key={`held-${item.id}`} className="list-item" style={{ display: 'block' }}>

@@ -12,10 +12,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, text
+from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.orm import aliased
 
 from app.core.config import get_settings
@@ -26,6 +26,7 @@ from app.services.autoreply import AutoReply, find_rule
 from app.services.knowledge import (approved_context, content_hash, needs_personal_answer,
                                     needs_verified_business_fact, peer_hash, safe_for_llm)
 from app.services.messaging import DeliveryOutcome, alert_admin, deliver_auto_reply
+from app.services.reply_windows import WINDOW_MANUAL_REASONS, automatic_reply_window_reason
 
 logger = logging.getLogger("gramma.auto_reply_queue")
 
@@ -117,8 +118,8 @@ async def finalize_delivery(
                 row.error_code = outcome.reason[:64]
                 slot.status = "unknown"  # consume quota conservatively
             else:
-                row.state = ("legacy_failed" if legacy else
-                             "manual_review" if outcome.reason == "reply_window_expired" else "failed")
+                row.state = ("manual_review" if outcome.reason in WINDOW_MANUAL_REASONS else
+                             "legacy_failed" if legacy else "failed")
                 row.error_code = outcome.reason[:64]
                 slot.status = "released"  # definite no-send on both paths
             await session.commit()
@@ -336,12 +337,67 @@ def _next_llm_hold(now: datetime) -> datetime:
                                                 second=0, microsecond=0).astimezone(timezone.utc)
 
 
-def _outside_reply_window(inbox: InboxMessage, now: datetime) -> bool:
-    """5-minute safety buffer, using original receipt rather than claim time."""
-    received = inbox.received_at or inbox.created_at
-    if received.tzinfo is None:
-        received = received.replace(tzinfo=timezone.utc)
-    return now >= received + timedelta(hours=24) - timedelta(minutes=5)
+async def _hold_quota_reason(session, account_id: int, now: datetime) -> str | None:
+    """Read-only precheck for Hold; the existing SQL reservation is authoritative.
+
+    Count precisely the same committed slots + old automatic ChatbotX sends
+    as reserve_auto_reply_slot. A concurrent fresh send can consume the last
+    place after this check; the atomic reservation still rejects that Hold.
+    """
+    tehran = ZoneInfo("Asia/Tehran")
+    local_day = now.astimezone(tehran).date()
+    day_start = datetime.combine(local_day, time.min, tzinfo=tehran).astimezone(timezone.utc)
+    day_end = datetime.combine(local_day + timedelta(days=1), time.min,
+                               tzinfo=tehran).astimezone(timezone.utc)
+    active = ("reserved", "sent", "unknown")
+    day_slots = (await session.execute(select(func.count()).select_from(AutoReplySlot).where(
+        AutoReplySlot.account_id == account_id, AutoReplySlot.status.in_(active),
+        AutoReplySlot.reserved_at >= day_start, AutoReplySlot.reserved_at < day_end,
+    ))).scalar_one()
+    day_legacy = (await session.execute(select(func.count()).select_from(ActivityLog).where(
+        ActivityLog.account_id == account_id, ActivityLog.action == "chatbotx_outbound",
+        ActivityLog.created_at >= day_start, ActivityLog.created_at <= now,
+    ))).scalar_one()
+    if day_slots + day_legacy >= 4500:
+        return "daily_limit"
+    hour_start = now - timedelta(hours=1)
+    hour_slots = (await session.execute(select(func.count()).select_from(AutoReplySlot).where(
+        AutoReplySlot.account_id == account_id, AutoReplySlot.status.in_(active),
+        AutoReplySlot.reserved_at > hour_start, AutoReplySlot.reserved_at <= now,
+    ))).scalar_one()
+    hour_legacy = (await session.execute(select(func.count()).select_from(ActivityLog).where(
+        ActivityLog.account_id == account_id, ActivityLog.action == "chatbotx_outbound",
+        ActivityLog.created_at > hour_start, ActivityLog.created_at <= now,
+    ))).scalar_one()
+    return "hourly_limit" if hour_slots + hour_legacy >= 200 else None
+
+
+def _defer_hold_until(reason: str, now: datetime) -> datetime:
+    # Never promote a quota-blocked Hold to fresh `pending` next minute.
+    return (_next_llm_hold(now) if reason == "daily_limit" else
+            now + timedelta(hours=1, minutes=1))
+
+
+def _defer_priority_change(row: InboxMessage, was_hold: bool) -> None:
+    """Recheck selection later; a held item must never masquerade as fresh."""
+    now = datetime.now(timezone.utc)
+    if was_hold:
+        row.state = "hold"
+        row.hold_attempts = max(0, (row.hold_attempts or 0) - 1)
+        row.scheduled_for = now + timedelta(minutes=5)
+        row.ready_at = row.scheduled_for
+    else:
+        row.state, row.ready_at = "pending", now
+
+
+async def _newer_inbound_exists(session, row: InboxMessage) -> bool:
+    if not row.conversation_id:
+        return False
+    return (await session.execute(select(InboxMessage.id).where(
+        InboxMessage.source == "chatbotx", InboxMessage.account_id == row.account_id,
+        InboxMessage.conversation_id == row.conversation_id,
+        InboxMessage.id > row.id,
+    ).limit(1))).scalar_one_or_none() is not None
 
 
 async def _notify_worker(page: str, inbox_id: int, reason: str, *, ambiguous: bool = False) -> None:
@@ -410,40 +466,86 @@ async def process_one_auto_reply() -> dict:
     if not get_settings().auto_reply_worker_enabled:
         return {"state": "disabled", "sent": 0}
     now = datetime.now(timezone.utc)
+    today_start = datetime.combine(now.astimezone(ZoneInfo("Asia/Tehran")).date(),
+                                   time.min, tzinfo=ZoneInfo("Asia/Tehran")).astimezone(timezone.utc)
     async with SessionLocal() as session:
         earlier = aliased(InboxMessage)
+        fresh_waiting = aliased(InboxMessage)
         row = (await session.execute(select(InboxMessage).where(
             InboxMessage.source == "chatbotx",
             InboxMessage.account_id.is_not(None), InboxMessage.ready_at <= now,
             InboxMessage.state.in_(["pending", "generating", "hold"]),
             # A held row is not eligible until its explicit next-day deadline.
-            ((InboxMessage.state != "hold") | (InboxMessage.scheduled_for <= now)),
+            or_(InboxMessage.state != "hold", InboxMessage.scheduled_for <= now),
+            # Do not let another concurrent Worker take the final slot for a
+            # Hold while any due fresh reply on that page is still pending OR
+            # being generated, even if its row was already claimed elsewhere.
+            or_(InboxMessage.state != "hold",
+                ~select(fresh_waiting.id).where(
+                    fresh_waiting.source == "chatbotx",
+                    fresh_waiting.account_id == InboxMessage.account_id,
+                    fresh_waiting.id != InboxMessage.id,
+                    fresh_waiting.state.in_(["pending", "generating"]),
+                    or_(fresh_waiting.state == "generating",
+                        fresh_waiting.ready_at <= now),
+                ).exists()),
             ~select(AutoReplySlot.id).where(
                 AutoReplySlot.inbox_id == InboxMessage.id
             ).exists(),
-            # Preserve per-conversation order. A sent/unknown attempt does not
-            # get replayed; an unknown earlier send blocks later auto replies
-            # in that conversation until a human resolves it.
+            # Older Hold never blocks a newer inbound in the same conversation;
+            # unknown/sending attempts still block to prevent duplicate sends.
             ~select(earlier.id).where(
                 earlier.source == "chatbotx",
                 earlier.account_id == InboxMessage.account_id,
                 earlier.conversation_id == InboxMessage.conversation_id,
                 earlier.conversation_id != "",
                 earlier.id < InboxMessage.id,
-                earlier.state.in_(["pending", "generating", "hold", "processing",
+                earlier.state.in_(["pending", "generating", "processing",
                                    "unknown", "legacy_unknown"]),
             ).exists(),
-        ).order_by(InboxMessage.created_at, InboxMessage.id)
+        ).order_by(
+            case((and_(InboxMessage.state != "hold",
+                       InboxMessage.received_at >= today_start), 0),
+                 (InboxMessage.state != "hold", 1), else_=2),
+            InboxMessage.created_at, InboxMessage.id,
+        )
             .limit(1).with_for_update(skip_locked=True))).scalar_one_or_none()
         if row is None:
             return {"state": "empty", "sent": 0}
         inbox_id, account_id = row.id, row.account_id
-        if _outside_reply_window(row, now):
-            # Hold survives in Supabase, but cannot be auto-sent outside Meta's
-            # customer-care window; only the owner may decide what to do next.
-            row.state, row.error_code = "manual_review", "reply_window_expired"
+        was_hold = row.state == "hold" or (row.hold_attempts or 0) > 0
+        window_reason = automatic_reply_window_reason(row, now)
+        if window_reason:
+            # Never spend a provider quota or reserve an outbound slot outside
+            # the channel's proved Meta window (including unknown timestamps).
+            row.state, row.error_code = "manual_review", window_reason
+            row.scheduled_for = None
             await session.commit()
             return {"state": "manual_review", "sent": 0}
+        if was_hold and await _newer_inbound_exists(session, row):
+            row.state, row.error_code = "manual_review", "superseded_by_new_inbound"
+            row.scheduled_for = None
+            await session.commit()
+            return {"state": "manual_review", "sent": 0}
+        if row.state == "generating" and was_hold:
+            # An expired due-time lease may have already used the one attempt.
+            # Unlike an initial pre-send lease, don't infer a safe retry.
+            row.state, row.error_code = "manual_review", "hold_retry_interrupted"
+            await session.commit()
+            return {"state": "manual_review", "sent": 0}
+        if row.state == "hold":
+            if row.hold_attempts:
+                row.state, row.error_code = "manual_review", "hold_retry_exhausted"
+                row.scheduled_for = None
+                await session.commit()
+                return {"state": "manual_review", "sent": 0}
+            reason = await _hold_quota_reason(session, account_id, now)
+            if reason:
+                row.scheduled_for = _defer_hold_until(reason, now)
+                row.ready_at, row.error_code = row.scheduled_for, reason
+                await session.commit()
+                return {"state": "hold_quota_deferred", "sent": 0}
+            row.hold_attempts = 1  # exactly one due-time LLM retry
         row.state = "generating"
         row.scheduled_for = None
         row.claim_version = (row.claim_version or 0) + 1
@@ -476,6 +578,10 @@ async def process_one_auto_reply() -> dict:
             except Exception as exc:  # provider/catalogue failures are never minute-retried
                 logger.warning("LLM generation unavailable inbox=%s error_type=%s",
                                inbox_id, type(exc).__name__)
+                if was_hold:
+                    finished = await _finish_unanswered(
+                        inbox_id, version, page, "llm_retry_exhausted", state="manual_review")
+                    return {"state": "manual_review" if finished else "lease_superseded", "sent": 0}
                 requeued = await _requeue_unsent(
                     inbox_id, version, page, "llm_unavailable",
                     hold_until=_next_llm_hold(datetime.now(timezone.utc)),
@@ -494,18 +600,28 @@ async def process_one_auto_reply() -> dict:
             )
             return {"state": ("manual_review" if manual else "no_reply") if finished
                     else "lease_superseded", "sent": 0}
-        if len(reply_text) > 2000 or not inbox.conversation_id:
+        if len(reply_text) > 2000 or (not inbox.conversation_id and inbox.channel != "comment"):
             finished = await _finish_unanswered(inbox_id, version, page,
                                                 "invalid_auto_reply", state="failed")
             return {"state": "invalid_auto_reply" if finished else "lease_superseded", "sent": 0}
+        if (inbox.channel == "comment" and not inbox.conversation_id
+                and not (inbox.context or {}).get("post_id")):
+            finished = await _finish_unanswered(inbox_id, version, page,
+                                                "private_reply_identifiers_missing", state="manual_review")
+            return {"state": "manual_review" if finished else "lease_superseded", "sent": 0}
         async with SessionLocal() as session:
             fresh = await session.get(InboxMessage, inbox_id, with_for_update=True)
             if (fresh is None or fresh.state != "generating"
                     or fresh.claim_version != version):
                 return {"state": "lease_superseded", "sent": 0}
-            if _outside_reply_window(fresh, datetime.now(timezone.utc)):
-                fresh.state, fresh.error_code = "manual_review", "reply_window_expired"
+            window_reason = automatic_reply_window_reason(fresh, datetime.now(timezone.utc))
+            if window_reason:
+                fresh.state, fresh.error_code = "manual_review", window_reason
                 await session.commit()  # NO send intent or quota was reserved
+                return {"state": "manual_review", "sent": 0}
+            if was_hold and await _newer_inbound_exists(session, fresh):
+                fresh.state, fresh.error_code = "manual_review", "superseded_by_new_inbound"
+                await session.commit()
                 return {"state": "manual_review", "sent": 0}
             # Re-check the entire priority chain immediately before slot +
             # send intent. A newly created template/automation can supersede
@@ -513,7 +629,7 @@ async def process_one_auto_reply() -> dict:
             current_text, current_source, _ = await _worker_reply_text(session, fresh)
             if current_source != reply_source or (current_text is not None
                                                   and current_text != reply_text):
-                fresh.state, fresh.ready_at = "pending", datetime.now(timezone.utc)
+                _defer_priority_change(fresh, was_hold)
                 await session.commit()
                 return {"state": "priority_changed", "sent": 0}
             # Do not use a template/rule disabled or changed while the LLM was
@@ -522,14 +638,14 @@ async def process_one_auto_reply() -> dict:
                 template = await session.get(ReplyTemplate, int(reply_source.partition(":")[2]))
                 if (template is None or template.account_id != account_id
                         or not template.enabled or template.reply != reply_text):
-                    fresh.state, fresh.ready_at = "pending", datetime.now(timezone.utc)
+                    _defer_priority_change(fresh, was_hold)
                     await session.commit()
                     return {"state": "template_changed", "sent": 0}
             if reply_source.startswith("legacy_rule:"):
                 rule = await session.get(AutoReply, int(reply_source.partition(":")[2]))
                 if (rule is None or rule.account_id != account_id
                         or not rule.enabled or rule.reply != reply_text):
-                    fresh.state, fresh.ready_at = "pending", datetime.now(timezone.utc)
+                    _defer_priority_change(fresh, was_hold)
                     await session.commit()
                     return {"state": "rule_changed", "sent": 0}
                 rule.matches = (rule.matches or 0) + 1
@@ -544,9 +660,18 @@ async def process_one_auto_reply() -> dict:
                     if (pending is None or pending.state != "generating"
                             or pending.claim_version != version):
                         return {"state": "lease_superseded", "sent": 0}
-                    pending.state, pending.error_code = "pending", result
-                    pending.ready_at = (_next_tehran_day(now) if result == "daily_limit"
-                                        else now + timedelta(minutes=1))
+                    pending.error_code = result
+                    if was_hold:
+                        # Keep original Hold behind new traffic. A quota race
+                        # made no POST, so its one LLM retry is not consumed.
+                        pending.state = "hold"
+                        pending.hold_attempts = max(0, (pending.hold_attempts or 0) - 1)
+                        pending.scheduled_for = _defer_hold_until(result, datetime.now(timezone.utc))
+                        pending.ready_at = pending.scheduled_for
+                    else:
+                        pending.state = "pending"
+                        pending.ready_at = (_next_tehran_day(now) if result == "daily_limit"
+                                            else now + timedelta(minutes=1))
                     await limited.commit()
                 return {"state": result, "sent": 0}
             if result != "reserved":
@@ -562,13 +687,20 @@ async def process_one_auto_reply() -> dict:
         await finalize_delivery(inbox_id=inbox_id, account=account, outcome=outcome, legacy=False)
         return {"state": outcome.state, "sent": int(outcome.state == "sent")}
     except Exception as exc:  # noqa: BLE001
-        logger.exception("new auto-reply worker failed inbox=%s", inbox_id)
+        logger.error("new auto-reply worker failed inbox=%s error_type=%s",
+                     inbox_id, type(exc).__name__)
         page = account.username if account is not None else "نامشخص"
         if not send_slot_committed:
-            requeued = await _requeue_unsent(inbox_id, version, page,
-                                             "worker_pre_send_error", minutes=2)
-            if requeued:
-                return {"state": "pre_send_queued", "sent": 0}
+            if was_hold:
+                finished = await _finish_unanswered(inbox_id, version, page,
+                                                    "hold_retry_interrupted", state="manual_review")
+                if finished:
+                    return {"state": "manual_review", "sent": 0}
+            else:
+                requeued = await _requeue_unsent(inbox_id, version, page,
+                                                 "worker_pre_send_error", minutes=2)
+                if requeued:
+                    return {"state": "pre_send_queued", "sent": 0}
         # A committed slot means an outbound POST MIGHT have happened. An
         # exception cannot turn it back into a retryable pending message.
         await _notify_worker(page, inbox_id, "worker_exception_ambiguous", ambiguous=True)
@@ -601,6 +733,41 @@ async def _reconcile_stale_send_intent() -> None:
         account = await session.get(InstagramAccount, account_id) if account_id else None
     await _notify_worker(account.username if account else "نامشخص", inbox_id,
                          "worker_crash_ambiguous", ambiguous=True)
+
+
+async def review_held_replies_nightly() -> dict:
+    """Nightly DB-only expiry/supersession sweep; NEVER generate or send.
+
+    The minute Worker still handles any 13:00 due Hold after prioritizing new
+    messages. This sweep moves provably expired Hold to the private owner queue
+    earlier, even if the minute Worker is busy with fresh traffic.
+    """
+    from app.services.zernio_publishing import normalize_username
+
+    now = datetime.now(timezone.utc)
+    async with SessionLocal() as session:
+        pages = (await session.execute(select(InstagramAccount).where(
+            InstagramAccount.status == "connected",
+            InstagramAccount.username.ilike("zeynalikids"),
+        ))).scalars().all()
+        if len(pages) != 1 or normalize_username(pages[0].username) != "zeynalikids":
+            return {"state": "page_not_unique", "reviewed": 0, "manual": 0}
+        rows = (await session.execute(select(InboxMessage).where(
+            InboxMessage.account_id == pages[0].id,
+            InboxMessage.source == "chatbotx", InboxMessage.state == "hold",
+        ).order_by(InboxMessage.received_at, InboxMessage.id)
+            .limit(400).with_for_update(skip_locked=True))).scalars().all()
+        changed = 0
+        for row in rows:
+            reason = automatic_reply_window_reason(row, now)
+            if not reason and await _newer_inbound_exists(session, row):
+                reason = "superseded_by_new_inbound"
+            if reason:
+                row.state, row.error_code = "manual_review", reason
+                row.scheduled_for = None
+                changed += 1
+        await session.commit()
+    return {"state": "ok", "reviewed": len(rows), "manual": changed}
 
 
 async def process_auto_reply_batch() -> dict:
