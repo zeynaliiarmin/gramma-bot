@@ -50,11 +50,15 @@ async def post_real_publication(request: Request):
 
     # Only the owner's connected local page may be used; never trust request
     # body, account IDs or usernames supplied by a caller holding the secret.
-    async with SessionLocal() as session:
-        accounts = (await session.execute(select(InstagramAccount).where(
-            InstagramAccount.owner_id.in_(settings.admin_ids),
-            InstagramAccount.status == "connected",
-        ))).scalars().all()
+    try:
+        async with SessionLocal() as session:
+            accounts = (await session.execute(select(InstagramAccount).where(
+                InstagramAccount.owner_id.in_(settings.admin_ids),
+                InstagramAccount.status == "connected",
+            ))).scalars().all()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Local owner lookup failed: %s", type(exc).__name__)
+        return JSONResponse(status_code=503, content={"ok": False, "error": "بررسی مالکیت پیج موقتاً ممکن نیست."})
     owned = [account for account in accounts if normalize_username(account.username) == _EXPECTED_USERNAME]
     if len(owned) != 1:
         return JSONResponse(status_code=409, content={"ok": False, "error": "پیج مجاز و متصلِ مدیر یافت نشد."})
@@ -70,13 +74,21 @@ async def post_real_publication(request: Request):
     # Claim the one-shot key in the primary DB BEFORE the SDK can send a POST.
     # PostgreSQL's unique constraint makes concurrent callers race-safe. If
     # the provider times out, keep the claim: the publication may have worked.
-    async with SessionLocal() as session:
-        claimed = (await session.execute(text("""
-            INSERT INTO public.idempotency_keys (key, meta)
-            VALUES (:key, '{"route":"test-publish-real","status":"attempting"}'::jsonb)
-            ON CONFLICT (key) DO NOTHING RETURNING key
-        """), {"key": _IDEMPOTENCY_KEY})).scalar_one_or_none()
-        await session.commit()
+    try:
+        async with SessionLocal() as session:
+            claimed = (await session.execute(text("""
+                INSERT INTO public.idempotency_keys (key, meta)
+                VALUES (:key, '{"route":"test-publish-real","status":"attempting"}'::jsonb)
+                ON CONFLICT (key) DO NOTHING RETURNING key
+            """), {"key": _IDEMPOTENCY_KEY})).scalar_one_or_none()
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("One-shot claim result unknown: %s", type(exc).__name__)
+        return JSONResponse(status_code=503, content={
+            "ok": False,
+            "error": "وضعیت ثبت کلید نامشخص است؛ پیش از تلاش دوباره وضعیت Zernio و دیتابیس را بررسی کنید.",
+            "retry_safe": False,
+        })
     if not claimed:
         return JSONResponse(status_code=409, content={
             "ok": False,
