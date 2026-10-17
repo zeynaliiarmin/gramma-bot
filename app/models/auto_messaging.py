@@ -71,6 +71,9 @@ class InboxMessage(Base):
     # Whitelisted IDs only; never dump raw provider payloads or access tokens.
     context: Mapped[dict] = mapped_column(JSONB_PORTABLE, nullable=False, default=dict)
     state: Mapped[str] = mapped_column(String(28), nullable=False, default="legacy_processing", index=True)
+    # Bumped on each pre-send LLM lease; a stale worker may not promote a
+    # superseded generation to a quota-reserved outbound POST.
+    claim_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     reply_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     reply_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     sent_provider: Mapped[str | None] = mapped_column(String(16), nullable=True)

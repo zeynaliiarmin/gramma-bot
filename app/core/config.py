@@ -9,6 +9,7 @@ Uses pydantic-settings for validation and sane defaults.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from typing import Literal
 
@@ -57,14 +58,9 @@ class Settings(BaseSettings):
     timezone: str = "Asia/Tehran"
     auto_refresh_margin_minutes: int = 2880  # 48h safety margin
 
-    # ── Text LLM priority: Gemini → OpenRouter free → Mistral Free mode ──
-    # No key is sent to a browser. Only explicitly configured providers run.
-    gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
-    openrouter_api_key: str = ""
-    openrouter_model: str = "meta-llama/llama-3.2-3b-instruct:free"
-    mistral_api_key: str = ""
-    mistral_model: str = "mistral-small-latest"
+    # ── Text LLM: Mistral → Gemini Flash → live free OpenRouter ──
+    # Keys are NOT copied into cached Settings: the server-side adapter reads
+    # them directly with os.getenv only. Never expose any key to a browser.
     tavily_api_key: str = ""
 
     # ── ChatbotX (Instagram automation via Login with Instagram) ──
@@ -77,9 +73,9 @@ class Settings(BaseSettings):
     chatbotx_workspace_id: str = ""
     chatbotx_webhook_secret: str = ""
     chatbotx_enabled: bool = False
-    # Phase 4: deliberately OFF in production until the owner explicitly
-    # approves and a separate protected schedule is installed. Inline legacy
-    # replies remain on and use the same atomic quota while this flag is off.
+    # Default OFF as a fail-safe. The owner may explicitly set this true in
+    # Production after approving a separately authenticated pg_cron job.
+    # False keeps the capped, inline legacy ChatbotX route active.
     auto_reply_worker_enabled: bool = False
 
     # ── Zernio (the only Instagram post-publication provider) ──
@@ -169,16 +165,17 @@ class Settings(BaseSettings):
 
     @property
     def llm_configured(self) -> bool:
-        return bool(self.gemini_api_key or self.openrouter_api_key or self.mistral_api_key)
+        return bool(os.getenv("MISTRAL_API_KEY") or os.getenv("GEMINI_API_KEY")
+                    or os.getenv("OPENROUTER_API_KEY"))
 
     @property
     def llm_primary_provider(self) -> str:
-        if self.gemini_api_key:
-            return "Gemini"
-        if self.openrouter_api_key:
-            return "OpenRouter (:free)"
-        if self.mistral_api_key:
+        if os.getenv("MISTRAL_API_KEY"):
             return "Mistral"
+        if os.getenv("GEMINI_API_KEY"):
+            return "Gemini"
+        if os.getenv("OPENROUTER_API_KEY"):
+            return "OpenRouter (:free پویا)"
         return "آفلاین (بدون کلید)"
 
     @property

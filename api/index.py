@@ -272,7 +272,7 @@ async def cron_trigger(job: str, request: Request):
       * outbound-story            — submit at most one released Story slide (separate 1 min)
       * telegram-albums           — assemble quiet albums and show settings (every 1 min; never publish)
       * process-comment-queue     — drain the legacy Meta comment queue (every 5 min)
-      * auto-replies              — NEW ChatbotX inbox worker (NOT SCHEDULED; OFF)
+      * auto-replies              — ChatbotX inbox worker (separate approved pg_cron)
       * check-instagram-health    — probe connected pages (every 10 min)
       * reset-daily-counters      — reports today's counters (00:00)
       * daily-report              — 23:59 Tehran admin report + alerts
@@ -290,8 +290,8 @@ async def cron_trigger(job: str, request: Request):
             return Response(status_code=403, content="forbidden")
 
     if job == "auto-replies":
-        # Phase 4 intentionally ships with NO cron schedule and the flag OFF.
-        # A separate explicit owner approval is required before either changes.
+        # Default-off safeguard: even an authenticated schedule cannot send
+        # unless the owner explicitly enabled this flag in Production.
         if request.method != "POST":
             return Response(status_code=405, content="POST required")
         if not get_settings().auto_reply_worker_enabled:

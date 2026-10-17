@@ -248,8 +248,8 @@ async def chatbotx_webhook(request: Request):
     if not message["conversation_id"] and not message["context"]["comment_id"]:
         return {"ok": True, "replied": False, "reason": "no_destination"}
     if get_settings().auto_reply_worker_enabled:
-        # Worker mode is prepared but NEVER activated or scheduled in this
-        # rollout. New rows only; legacy shadow rows can never enter this path.
+        # Only newly authenticated inbound rows enter this queue. Prior
+        # inline shadow rows are terminal and can never be replayed.
         return {"ok": True, "queued": True, "inbox_id": inbox_id}
     from app.services.auto_reply_queue import legacy_reply
     result = await legacy_reply(inbox_id, account, message)

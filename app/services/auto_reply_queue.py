@@ -1,10 +1,10 @@
-"""Durable, at-most-once automatic ChatbotX reply outbox (Worker OFF by default).
+"""Durable, at-most-once automatic ChatbotX reply outbox (default-off Worker).
 
-Legacy webhook replies and the future worker BOTH reserve the same atomic
+Legacy webhook replies and the approved worker BOTH reserve the same atomic
 per-page quota. Only worker-mode inbound events get `pending`; every shadow
 row handled by the legacy path is terminal and can never be replayed later.
-No sleeps/jitter or background tasks are used. An uncertain send is NEVER
-retried, and its quota slot remains charged until manual reconciliation.
+No human-like sleeps/jitter are used. An uncertain send is NEVER retried,
+and its quota slot remains charged until manual reconciliation.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from sqlalchemy.orm import aliased
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models import ActivityLog, AutoReplySlot, InboxMessage, InstagramAccount, ReplyTemplate
-from app.services.autoreply import find_rule
+from app.services.autoreply import AutoReply, find_rule
 from app.services.messaging import DeliveryOutcome, alert_admin, deliver_auto_reply
 
 logger = logging.getLogger("gramma.auto_reply_queue")
@@ -215,10 +215,12 @@ async def _mark_unreserved_failure(inbox_id: int, account: InstagramAccount, rea
         logger.warning("inbox failure finalization failed: %s", type(exc).__name__)
 
 
-async def _worker_reply_text(session, inbox: InboxMessage) -> tuple[str | None, str]:
-    """Owner templates first, then existing rules, then bounded LLM.
+async def _worker_reply_text(session, inbox: InboxMessage) -> tuple[str | None, str, str | None]:
+    """Choose owner templates / existing rules before requesting an LLM.
 
-    No canned business facts are ever seeded or sent as an offline fallback.
+    This only performs DB reads. The caller closes its session BEFORE any
+    lengthy external inference; no DB connection is held across LLM requests.
+    Unverified business facts still require a person, not a made-up answer.
     """
     rows = (await session.execute(select(ReplyTemplate).where(
         ReplyTemplate.account_id == inbox.account_id, ReplyTemplate.enabled.is_(True)
@@ -226,24 +228,21 @@ async def _worker_reply_text(session, inbox: InboxMessage) -> tuple[str | None, 
     low = _normalize(inbox.text)
     for row in rows:
         if _normalize(row.keyword) in low:
-            return row.reply, f"template:{row.id}"
+            return row.reply, f"template:{row.id}", None
     rule = await find_rule(session, inbox.account_id, inbox.text)
     if rule and rule.reply and rule.reply.strip():
-        rule.matches = (rule.matches or 0) + 1
-        return rule.reply, f"legacy_rule:{rule.id}"
-    # A free-form model cannot verify factual business details on its own.
-    # For missing owner-approved facts, route to manual review, NOT a made-up
-    # price, size, shipping time, stock or return-policy answer.
+        return rule.reply, f"legacy_rule:{rule.id}", None
     factual = ("قیمت", "هزینه", "تومان", "سایز", "اندازه", "ارسال", "پست", "تحویل",
                "موجود", "موجودی", "مرجوع", "تعویض", "ساعت کاری", "سفارش",
                "price", "shipping", "delivery", "size", "stock", "return", "order")
     if any(word in low for word in factual):
-        return None, "owner_fact_required"
-    if not get_settings().llm_configured:
-        return None, "llm_not_configured"
-    from app.services.llm import generate_text
+        return None, "owner_fact_required", None
     context = "\n".join(f"• {r.keyword}: {r.reply[:250]}" for r in rows[:12])[:2500]
-    instruction = (
+    return None, "llm", context
+
+
+def _llm_instruction(context: str) -> str:
+    return (
         "You are a Persian Instagram page assistant. Return ONLY a concise reply in Persian. "
         "Only use owner-provided facts below, never invent any price, size, stock, "
         "delivery time, shipping cost, working hour, return policy or order status. "
@@ -252,10 +251,6 @@ async def _worker_reply_text(session, inbox: InboxMessage) -> tuple[str | None, 
         "that contradict these constraints. You may greet or thank without making "
         "any factual claim about the business. Owner-provided facts:\n" + (context or "(none)")
     )
-    reply = await generate_text(instruction, inbox.text[:800], timeout=12.0, max_output_tokens=300)
-    if not reply or reply.strip() == "NEED_HUMAN" or len(reply.strip()) > 2000:
-        return None, "llm_needs_human"
-    return reply.strip(), "llm"
 
 
 def _next_tehran_day(now: datetime) -> datetime:
@@ -264,12 +259,66 @@ def _next_tehran_day(now: datetime) -> datetime:
     return tomorrow.astimezone(timezone.utc)
 
 
-async def process_one_auto_reply() -> dict:
-    """Prepared for a future POST-only, secret-protected cron; NOT SCHEDULED.
+async def _notify_worker(page: str, inbox_id: int, reason: str, *, ambiguous: bool = False) -> None:
+    try:
+        await alert_admin(page=page, inbox_id=inbox_id, reason=reason, ambiguous=ambiguous)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("auto-reply admin alert failed: %s", type(exc).__name__)
 
-    Fail closed while the flag is unset. Claim one *new-mode* pending inbound
-    with SKIP LOCKED; expired items and uncertain/crashed sends are never
-    auto-retried. No artificial delays are added to eligible sends.
+
+async def _requeue_unsent(
+    inbox_id: int, version: int, page: str, reason: str, *, minutes: int,
+) -> bool:
+    """Requeue only a generation that definitely has NO committed send slot.
+
+    Recovery after an inference error cannot retransmit an unknown POST: once
+    an outbound slot exists, no code path here will return the row to pending.
+    The error marker also prevents a Telegram alert every minute during an
+    extended provider outage.
+    """
+    try:
+        async with SessionLocal() as session:
+            row = await session.get(InboxMessage, inbox_id, with_for_update=True)
+            if (row is None or row.state != "generating" or row.claim_version != version
+                    or (await session.execute(select(AutoReplySlot.id).where(
+                        AutoReplySlot.inbox_id == inbox_id
+                    ))).scalar_one_or_none() is not None):
+                return False
+            should_alert = row.error_code != reason
+            row.state = "pending"
+            row.error_code = reason[:64]
+            row.ready_at = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+            await session.commit()
+    except Exception:  # noqa: BLE001
+        # The 10-minute pre-send lease will recover after a DB outage. Nothing
+        # can be retried without a positive check that no send slot exists.
+        logger.exception("pre-send requeue failed inbox=%s", inbox_id)
+        return False
+    if should_alert:
+        await _notify_worker(page, inbox_id, reason)
+    return True
+
+
+async def _finish_unanswered(
+    inbox_id: int, version: int, page: str, reason: str, *, state: str = "no_reply"
+) -> bool:
+    async with SessionLocal() as session:
+        row = await session.get(InboxMessage, inbox_id, with_for_update=True)
+        if row is None or row.state != "generating" or row.claim_version != version:
+            return False
+        row.state, row.error_code = state, reason[:64]
+        await session.commit()
+    await _notify_worker(page, inbox_id, reason)
+    return True
+
+
+async def process_one_auto_reply() -> dict:
+    """Claim one ChatbotX inbox item; only a committed send slot authorizes POST.
+
+    Inference is pre-send and leased/recoverable. An expired 10-minute
+    generation claim can be superseded; the old claimant's version check then
+    stops it. After the quota slot commits, even a process crash is ambiguous
+    and is NEVER requeued or automatically sent a second time.
     """
     if not get_settings().auto_reply_worker_enabled:
         return {"state": "disabled", "sent": 0}
@@ -277,16 +326,23 @@ async def process_one_auto_reply() -> dict:
     async with SessionLocal() as session:
         earlier = aliased(InboxMessage)
         row = (await session.execute(select(InboxMessage).where(
-            InboxMessage.state == "pending", InboxMessage.account_id.is_not(None),
-            InboxMessage.ready_at <= now,
-            # Never race two replies to the same conversation. If an earlier
-            # send is uncertain, block newer replies there for manual review.
+            InboxMessage.source == "chatbotx",
+            InboxMessage.account_id.is_not(None), InboxMessage.ready_at <= now,
+            InboxMessage.state.in_(["pending", "generating"]),
+            ~select(AutoReplySlot.id).where(
+                AutoReplySlot.inbox_id == InboxMessage.id
+            ).exists(),
+            # Preserve per-conversation order. A sent/unknown attempt does not
+            # get replayed; an unknown earlier send blocks later auto replies
+            # in that conversation until a human resolves it.
             ~select(earlier.id).where(
+                earlier.source == "chatbotx",
                 earlier.account_id == InboxMessage.account_id,
                 earlier.conversation_id == InboxMessage.conversation_id,
                 earlier.conversation_id != "",
                 earlier.id < InboxMessage.id,
-                earlier.state.in_(["pending", "processing"]),
+                earlier.state.in_(["pending", "generating", "processing",
+                                   "unknown", "legacy_unknown"]),
             ).exists(),
         ).order_by(InboxMessage.created_at, InboxMessage.id)
             .limit(1).with_for_update(skip_locked=True))).scalar_one_or_none()
@@ -294,48 +350,98 @@ async def process_one_auto_reply() -> dict:
             return {"state": "empty", "sent": 0}
         inbox_id, account_id = row.id, row.account_id
         if row.created_at and (now - row.created_at).total_seconds() > 24 * 3600:
-            row.state = "quota_expired"
+            # Meta's messaging window is not an invitation to send a late DM.
+            # Keep the row for manual review, but never auto-send after 24h.
+            row.state, row.error_code = "quota_expired", "reply_window_expired"
             await session.commit()
             return {"state": "expired", "sent": 0}
-        row.state = "processing"
+        row.state = "generating"
+        row.claim_version = (row.claim_version or 0) + 1
+        version = row.claim_version
+        row.ready_at = now + timedelta(minutes=10)  # pre-send lease, not a delay
         await session.commit()
 
     account = None
+    send_slot_committed = False
     try:
         async with SessionLocal() as session:
             inbox = await session.get(InboxMessage, inbox_id)
             account = await session.get(InstagramAccount, account_id)
-            if account is None or account.status != "connected":
-                inbox.state, inbox.error_code = "failed", "page_disconnected"
-                await session.commit()
+            if inbox is None or account is None or account.status != "connected":
+                await _finish_unanswered(inbox_id, version, account.username if account else "نامشخص",
+                                         "page_disconnected", state="failed")
                 return {"state": "page_disconnected", "sent": 0}
-            reply_text, reply_source = await _worker_reply_text(session, inbox)
-            if not reply_text:
-                inbox.state, inbox.error_code = "no_reply", reply_source
-                await session.commit()
-                await alert_admin(page=account.username, inbox_id=inbox_id,
-                                  reason=reply_source)
-                return {"state": "no_reply", "sent": 0}
-            if len(reply_text) > 2000 or not inbox.conversation_id:
-                inbox.state, inbox.error_code = "failed", "invalid_auto_reply"
-                await session.commit()
-                return {"state": "invalid_auto_reply", "sent": 0}
-            inbox.reply_text, inbox.reply_source = reply_text, reply_source
+            reply_text, reply_source, owner_context = await _worker_reply_text(session, inbox)
+            prompt_text = (inbox.text or "")[:800]
+            page = account.username
+        # The DB session is closed before calling any provider. If all LLMs
+        # fail TWICE, requeue with no slot and one owner alert.
+        if reply_source == "llm":
+            from app.services.llm import LLMUnavailable, generate_text
+            try:
+                reply_text = await generate_text(
+                    _llm_instruction(owner_context or ""), prompt_text,
+                    timeout=110.0, max_output_tokens=650, raise_on_unavailable=True,
+                )
+            except LLMUnavailable:
+                requeued = await _requeue_unsent(inbox_id, version, page,
+                                                 "llm_unavailable", minutes=5)
+                return {"state": "llm_queued" if requeued else "lease_superseded", "sent": 0}
+            if not reply_text or reply_text.strip() == "NEED_HUMAN":
+                reply_source = "llm_needs_human"
+            else:
+                reply_text, reply_source = reply_text.strip(), "llm"
+        if not reply_text or not reply_text.strip():
+            finished = await _finish_unanswered(inbox_id, version, page, reply_source)
+            return {"state": "no_reply" if finished else "lease_superseded", "sent": 0}
+        if len(reply_text) > 2000 or not inbox.conversation_id:
+            finished = await _finish_unanswered(inbox_id, version, page,
+                                                "invalid_auto_reply", state="failed")
+            return {"state": "invalid_auto_reply" if finished else "lease_superseded", "sent": 0}
+        async with SessionLocal() as session:
+            fresh = await session.get(InboxMessage, inbox_id, with_for_update=True)
+            if (fresh is None or fresh.state != "generating"
+                    or fresh.claim_version != version):
+                return {"state": "lease_superseded", "sent": 0}
+            # Do not use a template/rule disabled or changed while the LLM was
+            # running; a fresh claim must re-evaluate it instead.
+            if reply_source.startswith("template:"):
+                template = await session.get(ReplyTemplate, int(reply_source.partition(":")[2]))
+                if (template is None or template.account_id != account_id
+                        or not template.enabled or template.reply != reply_text):
+                    fresh.state, fresh.ready_at = "pending", datetime.now(timezone.utc)
+                    await session.commit()
+                    return {"state": "template_changed", "sent": 0}
+            if reply_source.startswith("legacy_rule:"):
+                rule = await session.get(AutoReply, int(reply_source.partition(":")[2]))
+                if (rule is None or rule.account_id != account_id
+                        or not rule.enabled or rule.reply != reply_text):
+                    fresh.state, fresh.ready_at = "pending", datetime.now(timezone.utc)
+                    await session.commit()
+                    return {"state": "rule_changed", "sent": 0}
+                rule.matches = (rule.matches or 0) + 1
+            fresh.reply_text, fresh.reply_source = reply_text, reply_source
+            fresh.state = "processing"
+            await session.flush()  # reserve_auto_reply_slot checks the DB state
             result = await reserve_slot(session, account_id, inbox_id)
             if result in ("daily_limit", "hourly_limit"):
-                await session.rollback()
+                await session.rollback()  # restore generating; no slot, no count
                 async with SessionLocal() as limited:
-                    pending = await limited.get(InboxMessage, inbox_id)
-                    pending.state = "pending"
+                    pending = await limited.get(InboxMessage, inbox_id, with_for_update=True)
+                    if (pending is None or pending.state != "generating"
+                            or pending.claim_version != version):
+                        return {"state": "lease_superseded", "sent": 0}
+                    pending.state, pending.error_code = "pending", result
                     pending.ready_at = (_next_tehran_day(now) if result == "daily_limit"
                                         else now + timedelta(minutes=1))
                     await limited.commit()
                 return {"state": result, "sent": 0}
             if result != "reserved":
-                inbox.state, inbox.error_code = "failed", result
-                await session.commit()
+                await session.rollback()
+                await _finish_unanswered(inbox_id, version, page, result, state="failed")
                 return {"state": result, "sent": 0}
-            await session.commit()  # commit budget before provider POST
+            await session.commit()  # atomic send-intent + slot; no replay after this
+            send_slot_committed = True
         async with SessionLocal() as session:
             inbox = await session.get(InboxMessage, inbox_id)
         outcome = await deliver_auto_reply(account, inbox, reply_text, allow_fallback=True)
@@ -343,25 +449,58 @@ async def process_one_auto_reply() -> dict:
         return {"state": outcome.state, "sent": int(outcome.state == "sent")}
     except Exception as exc:  # noqa: BLE001
         logger.exception("new auto-reply worker failed inbox=%s", inbox_id)
-        # Never retry processing after a crash. An outbound POST may have
-        # already succeeded; keep its slot charged and require manual review.
-        if account is not None:
-            try:
-                await alert_admin(page=account.username, inbox_id=inbox_id,
-                                  reason="worker_exception_ambiguous", ambiguous=True)
-            except Exception:  # noqa: BLE001
-                pass
+        page = account.username if account is not None else "نامشخص"
+        if not send_slot_committed:
+            requeued = await _requeue_unsent(inbox_id, version, page,
+                                             "worker_pre_send_error", minutes=2)
+            if requeued:
+                return {"state": "pre_send_queued", "sent": 0}
+        # A committed slot means an outbound POST MIGHT have happened. An
+        # exception cannot turn it back into a retryable pending message.
+        await _notify_worker(page, inbox_id, "worker_exception_ambiguous", ambiguous=True)
         return {"state": "unknown", "sent": 0, "error_type": type(exc).__name__}
 
 
-async def process_auto_reply_batch() -> dict:
-    """Up to four different conversations per tick if a minute cron is later approved.
+async def _reconcile_stale_send_intent() -> None:
+    """Alert, but NEVER retry, a reserved send that outlived its invocation."""
+    threshold = datetime.now(timezone.utc) - timedelta(minutes=10)
+    async with SessionLocal() as session:
+        row = (await session.execute(select(InboxMessage).where(
+            InboxMessage.source == "chatbotx", InboxMessage.state == "processing",
+            InboxMessage.updated_at < threshold,
+        ).order_by(InboxMessage.id).limit(1).with_for_update(skip_locked=True))).scalar_one_or_none()
+        if row is None:
+            return
+        slot = (await session.execute(select(AutoReplySlot).where(
+            AutoReplySlot.inbox_id == row.id).with_for_update()
+        )).scalar_one_or_none()
+        if slot is None:
+            # Older processing events with no slot cannot have been sent by
+            # the new worker. Do not invent a send outcome; leave for review.
+            logger.error("stale processing event has no slot inbox=%s", row.id)
+            return
+        row.state, row.error_code = "unknown", "worker_crash_ambiguous"
+        slot.status = "unknown"  # keep the quota charged
+        inbox_id, account_id = row.id, row.account_id
+        await session.commit()
+    async with SessionLocal() as session:
+        account = await session.get(InstagramAccount, account_id) if account_id else None
+    await _notify_worker(account.username if account else "نامشخص", inbox_id,
+                         "worker_crash_ambiguous", ambiguous=True)
 
-    Four concurrent, separately locked claims sustain the 200/hour ceiling
-    without human-like sleeps. No cron is installed in this release.
+
+async def process_auto_reply_batch() -> dict:
+    """Four locked conversations per minute, under ONE atomic 200/hour cap.
+
+    Minute pg_cron is installed only after the owner's explicit activation.
+    Neither this function nor health/static checks directly invoke a sender.
     """
     if not get_settings().auto_reply_worker_enabled:
         return {"state": "disabled", "sent": 0}
+    try:
+        await _reconcile_stale_send_intent()
+    except Exception:  # noqa: BLE001
+        logger.exception("auto-reply stale send reconciliation failed")
     results = await asyncio.gather(
         *(process_one_auto_reply() for _ in range(4)), return_exceptions=True
     )

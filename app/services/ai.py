@@ -69,7 +69,7 @@ async def generate_caption(
 ) -> str:
     """Generate a caption.
 
-    Gemini Flash → OpenRouter :free → Mistral Free mode → offline template.
+    Mistral Free mode → Gemini Flash → live OpenRouter :free → offline template.
     Nothing generated here is automatically sent to Instagram.
     """
     system = (

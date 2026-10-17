@@ -178,9 +178,8 @@ async def deliver_auto_reply(
     except Exception as exc:  # noqa: BLE001
         logger.warning("ChatbotX auto send uncertain: %s", type(exc).__name__)
         return DeliveryOutcome("unknown", reason="chatbotx_delivery_ambiguous")
-    # Staged rollout: the legacy inline path may only use its EXISTING
-    # ChatbotX send provider. Zernio fallback is prepared but dormant until
-    # the owner explicitly approves enabling the new worker.
+    # The legacy inline path may only use its existing ChatbotX provider.
+    # Only the approved Worker with a verified mapping may use Zernio fallback.
     if not allow_fallback or not get_settings().auto_reply_worker_enabled:
         return DeliveryOutcome("failed", reason="chatbotx_rejected_fallback_inactive")
     try:
@@ -210,6 +209,8 @@ async def alert_admin(*, page: str, inbox_id: int, reason: str, ambiguous: bool 
     code = (reason or "unknown")[:64]
     if reason == "page_not_identified":
         text = "⚠️ پیام بدون شناسه پیج دریافت شد و نیاز به بررسی دارد.\n"
+    elif reason == "llm_unavailable":
+        text = "⚠️ سرویس‌های هوش مصنوعی موقتاً در دسترس نیستند؛ پیام در صف باقی ماند.\n"
     elif ambiguous:
         text = f"⚠️ وضعیت پیام داخلی {inbox_id} نامشخص است؛ لطفاً بررسی کن.\n"
     else:
