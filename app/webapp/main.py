@@ -1125,6 +1125,134 @@ async def api_publish(request: Request):
         raise HTTPError(500, str(exc)[:300])
 
 
+def _require_zernio_admin(ident: MiniAppIdentity) -> None:
+    # One shared Zernio API key must never become a cross-tenant credential.
+    if ident.user_id not in settings.admin_ids:
+        raise HTTPError(403, "zernio_admin_only")
+
+
+@app.get("/api/zernio/accounts")
+async def api_zernio_accounts(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
+    """List only the admin's own matching Instagram accounts; read-only."""
+    from app.services.zernio_publishing import ZernioPublishError, get_zernio_publisher, normalize_username
+
+    _require_zernio_admin(ident)
+    pub = get_zernio_publisher()
+    if not pub.configured:
+        raise HTTPError(503, "zernio_not_configured")
+
+    async with SessionLocal() as session:
+        owned = await get_accounts_for_user(session, ident.user_id)
+    # Do not expose a Zernio account just because another user's page happens
+    # to have the same handle. Require an owned, connected local page too.
+    by_handle = {}
+    for account in owned:
+        if account.status == "connected" and normalize_username(account.username):
+            by_handle.setdefault(normalize_username(account.username), []).append(account)
+    if not by_handle:
+        return {"configured": True, "accounts": []}
+
+    try:
+        provider_accounts = await pub.list_instagram_accounts()
+    except ZernioPublishError as exc:
+        raise HTTPError(exc.status_code, str(exc)) from exc
+    visible = []
+    for account in provider_accounts:
+        matches = by_handle.get(normalize_username(account["username"]), [])
+        if len(matches) == 1:
+            visible.append({
+                "id": account["id"],
+                "username": account["username"],
+                "active": account["active"],
+                "local_account_id": matches[0].id,
+            })
+    return {"configured": True, "accounts": visible}
+
+
+@app.post("/api/zernio/posts")
+async def api_zernio_create_post(
+    body: dict,
+    ident: MiniAppIdentity = Depends(resolve_miniapp_user),
+):
+    """Create a manual draft or scheduled Instagram post (never publish now)."""
+    from app.db.repositories import get_account_for_user
+    from app.models import ActivityLog
+    from app.services.zernio_publishing import ZernioPublishError, get_zernio_publisher
+
+    _require_zernio_admin(ident)
+    pub = get_zernio_publisher()
+    if not pub.configured:
+        raise HTTPError(503, "zernio_not_configured")
+    account_id = body.get("account_id")
+    if isinstance(account_id, bool) or not str(account_id).isdigit():
+        raise HTTPError(400, "invalid_account_id")
+    async with SessionLocal() as session:
+        account = await get_account_for_user(session, ident.user_id, int(account_id))
+        if account is None:
+            raise HTTPError(403, "not_your_account")
+        if account.status != "connected":
+            raise HTTPError(409, "account_not_connected")
+        username = account.username
+        local_id = account.id
+
+    mode = body.get("mode", "draft")
+    if mode == "schedule" and body.get("confirm_schedule") is not True:
+        raise HTTPError(400, "schedule_requires_confirmation")
+    try:
+        result = await pub.create_post(
+            zernio_account_id=body.get("zernio_account_id", ""),
+            expected_username=username,
+            caption=body.get("caption", ""),
+            media_urls=body.get("media_urls", []),
+            media_type=body.get("media_type", "post"),
+            mode=mode,
+            scheduled_jalali=body.get("scheduled_jalali", ""),
+        )
+    except ZernioPublishError as exc:
+        raise HTTPError(exc.status_code, str(exc)) from exc
+
+    # Auditing is best-effort; a DB failure must NOT encourage a duplicate POST.
+    try:
+        async with SessionLocal() as session:
+            session.add(ActivityLog(
+                user_id=ident.user_id,
+                account_id=local_id,
+                action="zernio_post_scheduled" if mode == "schedule" else "zernio_draft_created",
+                detail=f"post_id={result['post_id']} scheduled_jalali={result['scheduled_jalali'] or '-'}",
+                level="info",
+            ))
+            await session.commit()
+    except Exception as exc:
+        logger.warning("Zernio audit log failed: %s", type(exc).__name__)
+    return result
+
+
+@app.get("/api/test-zernio")
+async def api_test_zernio():
+    """Browser-safe public smoke check: no provider call, credentials or post."""
+    return {
+        "ok": True,
+        "service": "zernio",
+        "configured": bool(settings.zernio_api_key),
+        "read_only": True,
+        "post_sent": False,
+        "connection_check": "Mini-App → اتصالات → پیج‌های Zernio (با ورود مدیر)",
+    }
+
+
+@app.get("/api/test-post")
+async def api_test_post():
+    """A safe link to open manually; GET must NEVER create/publish a post."""
+    return {
+        "ok": True,
+        "test_type": "dry_run_link",
+        "post_sent": False,
+        "automatic_publish": False,
+        "manual_action": "در مینی‌اپِ احراز هویت‌شده، تب اتصالات، خودتان پیش‌نویس یا زمان‌بندی را تأیید کنید.",
+        "create_endpoint": "POST /api/zernio/posts (admin-only, manual)",
+    }
+
+
 @app.get("/api/integrations/status")
 async def api_integrations_status(ident: MiniAppIdentity = Depends(resolve_miniapp_user)):
     """Combined status of all integrations for Mini-App."""
@@ -1194,6 +1322,10 @@ async def api_integrations_status(ident: MiniAppIdentity = Depends(resolve_minia
         "chatbotx": cbx_status,
         "instagram_publisher": pub_status,
         "openclaw": openclaw_status,
+        "zernio": {
+            "admin": ident.user_id in settings.admin_ids,
+            "configured": bool(settings.zernio_api_key) and ident.user_id in settings.admin_ids,
+        },
         "reply_limits": summary,
         "meta_app": {
             "configured": bool(settings.meta_app_id and settings.meta_app_secret),

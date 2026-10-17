@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     chatbotx_webhook_secret: str = ""
     chatbotx_enabled: bool = False
 
+    # ── Zernio (separate, admin-only Instagram post drafts/scheduling) ──
+    # The key belongs only in .env / Vercel Environment Variables.
+    zernio_api_key: str = ""
+
     # ── Instagram Publishing via OpenClaw private-enabled (instagrapi) ──
     # When enabled, Gramma can publish posts/stories/reels via instagrapi
     # (private Instagram API) without a Meta app. Risky — must be rate-limited.

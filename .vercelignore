@@ -33,5 +33,7 @@ gramma-bridge/
 openclaw-e2e/
 openclaw-runtime/
 README.md
+FINAL_REPORT_*.md
+*_REPORT*.md
 Dockerfile
 docker-compose.yml

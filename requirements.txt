@@ -25,6 +25,10 @@ python-dotenv>=1.0
 pydantic>=2.7
 pydantic-settings>=2.3
 
+# ── Zernio official Python SDK (async accounts + Instagram drafts/scheduling) ──
+zernio-sdk==1.4.1242
+email-validator>=2.0,<3  # required by the SDK's generated Pydantic models
+
 # ── Logging ──────────────────────────────────────────────────
 structlog>=24.1
 
