@@ -23,6 +23,7 @@ from app.services.outbound_queue import (
     get_owned_post,
     get_owned_post_by_key,
     list_owned_posts,
+    reconcile_one_stalled_processing_post,
     refresh_one_accepted_post,
     telegram_post_key,
 )
@@ -252,6 +253,8 @@ async def cb_queue_detail(callback: CallbackQuery) -> None:
             return
         if action == "refresh" and job["status"] == "sent":
             job = await refresh_one_accepted_post(queue_id, callback.from_user.id) or job
+        elif action == "refresh" and job["status"] == "processing":
+            job = await reconcile_one_stalled_processing_post(queue_id, callback.from_user.id) or job
         await _display(callback, _detail(job), _keyboard(queue_id))
     except Exception as exc:  # noqa: BLE001
         logger.warning("queue detail unavailable error=%s", type(exc).__name__)

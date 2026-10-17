@@ -280,6 +280,61 @@ class ZernioPublisher:
                 pass
         return {"status": safe_status, "published_at": published_at}
 
+    async def find_queued_post(
+        self, *, account_id: str, idempotency_key: str,
+        content: str, queued_at: datetime,
+    ) -> str | None:
+        """Bounded GET/list lookup for an interrupted queue job; NEVER submit.
+
+        No match (including a post older than the most recent 50) is ambiguous,
+        NOT proof that it is safe to republish. Match the exact page, provider
+        metadata key, caption, and creation time before accepting a post ID.
+        """
+        if not self.configured or not account_id or not idempotency_key:
+            raise ZernioPublishError("برای بررسی صف، اتصال Zernio یا شناسهٔ درخواست نامعتبر است.")
+        try:
+            async with self._client_factory() as client:
+                response = await client.posts.alist_posts(
+                    account_id=account_id, platform="instagram", limit=50,
+                    sort_by="created-desc",
+                )
+        except ZernioError as exc:
+            raise _provider_error(exc, "list_posts") from exc
+        except Exception as exc:
+            logger.warning("Zernio list_posts failed: %s", type(exc).__name__)
+            raise ZernioPublishError("بررسی فقط‌خواندنی پست‌های Zernio ممکن نشد.", 502) from exc
+        posts = response.get("posts") if isinstance(response, dict) else None
+        if not isinstance(posts, list):
+            raise ZernioPublishError("پاسخ فهرست پست‌های Zernio معتبر نیست.", 502)
+        matches = []
+        for post in posts:
+            if not isinstance(post, dict) or post.get("content") != content:
+                continue
+            metadata = post.get("metadata")
+            if not isinstance(metadata, dict) or metadata.get("idempotencyKey") != idempotency_key:
+                continue
+            targets = [p for p in (post.get("platforms") or [])
+                       if isinstance(p, dict) and p.get("platform") == "instagram"]
+            if len(targets) != 1:
+                continue
+            target = targets[0].get("accountId")
+            target_id = target.get("_id") if isinstance(target, dict) else target
+            if target_id != account_id:
+                continue
+            try:
+                stamp = datetime.fromisoformat(str(post["createdAt"]).replace("Z", "+00:00"))
+                if (stamp.tzinfo is None or stamp < queued_at - timedelta(minutes=5)
+                        or stamp > datetime.now(timezone.utc) + timedelta(minutes=1)):
+                    continue
+            except (KeyError, ValueError, TypeError, OverflowError):
+                continue
+            post_id = post.get("_id")
+            if isinstance(post_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", post_id):
+                matches.append(post_id)
+        if len(matches) > 1:
+            raise ZernioPublishError("چند پست با شناسهٔ یکسان پیدا شد؛ بررسی دستی لازم است.", 409)
+        return matches[0] if matches else None
+
     async def publish_post(
         self,
         *,

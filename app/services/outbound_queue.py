@@ -2,18 +2,18 @@
 
 Only action_type='post' is handled here. ChatbotX replies and direct messages
 have separate workers and are deliberately not touched. A provider request is
-NEVER automatically retried: a crashed/ambiguous processing row needs human
-review, because the remote Instagram post may already exist.
+NEVER automatically retried: interrupted rows get a bounded read-only Zernio
+lookup, then human review if the remote result remains ambiguous.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -163,8 +163,10 @@ async def process_one_zernio_post() -> dict:
         await session.commit()  # durable claim BEFORE any provider request
 
     if queue_id is None:
-        # Read-only reconciliation of one previously accepted post. It cannot
-        # publish or retry anything, and leaves ambiguous jobs for review.
+        # These paths use Zernio GET/list only. They never claim or submit an
+        # ambiguous post, even when an earlier invocation was killed outright.
+        await deliver_one_confirmed_notification()
+        await reconcile_one_stalled_processing_post()
         await refresh_one_accepted_post()
         return {"claimed": 0, "published_requests": 0}
 
@@ -238,8 +240,10 @@ async def process_one_zernio_post() -> dict:
             return {"claimed": 1, "published_requests": 0, "state": "deferred"}
         await session.commit()
 
-    # This is the ONLY new provider publication call. No retries, even on
-    # connection errors/5xx: the result may already be live on Instagram.
+    # This is the ONLY provider publication call. Never retry it: even a 5xx
+    # or timeout can mean that Instagram has already received the post.
+    result: dict | None = None
+    reason = "نتیجه انتشار نامشخص است؛ پیش از اقدام دوباره Zernio و Instagram را بررسی کنید."
     try:
         result = await publisher.publish_post(
             zernio_account_id=matches[0]["id"],
@@ -250,41 +254,92 @@ async def process_one_zernio_post() -> dict:
             idempotency_key=key,
         )
     except Exception as exc:  # noqa: BLE001
-        reason = str(exc) if isinstance(exc, ZernioPublishError) else (
-            "نتیجه انتشار نامشخص است؛ پیش از اقدام دوباره Zernio و Instagram را بررسی کنید."
-        )
+        if isinstance(exc, ZernioPublishError):
+            reason = str(exc)
         logger.warning("publish result uncertain queue_id=%s error=%s", queue_id, type(exc).__name__)
-        await _mark_failed(queue_id, reason)
-        return {"claimed": 1, "published_requests": 1, "state": "failed_manual_review"}
+    finally:
+        # Finalize in a fresh DB transaction even on a Python exception or
+        # cancellation. A second *DB-only* attempt is safe; never repeat POST.
+        # A hard process kill cannot run finally; idle ticks perform bounded,
+        # read-only Zernio reconciliation of such processing rows instead.
+        try:
+            if result is None:
+                await _mark_failed(queue_id, reason)
+            else:
+                await _mark_sent(queue_id, result, matches[0]["id"])
+        except Exception:  # noqa: BLE001
+            logger.exception("post outcome finalization failed queue_id=%s; NEVER resubmit", queue_id)
+            raise
 
+    if result is None:
+        return {"claimed": 1, "published_requests": 1, "state": "failed_manual_review"}
+    # Record acceptance BEFORE this optional GET. A provider rollup saying
+    # 'published' is not enough: verify the exact Instagram target as well.
     try:
-        await _mark_sent(queue_id, result, matches[0]["id"])
-    except Exception:  # noqa: BLE001
-        # The claim remains processing (no retry). The remote post may exist.
-        logger.exception("provider accepted but queue audit failed queue_id=%s", queue_id)
-        raise
-    return {"claimed": 1, "published_requests": 1, "state": "sent", "queue_id": queue_id}
+        checked = await refresh_one_accepted_post(queue_id, owner)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("post confirmation deferred queue_id=%s error=%s", queue_id, type(exc).__name__)
+        checked = None
+    confirmed = bool(checked and checked["payload"].get("provider_status") == "published")
+    return {"claimed": 1, "published_requests": 1,
+            "state": "published" if confirmed else "accepted", "queue_id": queue_id}
+
+
+async def _commit_queue_update(sql: str, params: dict) -> dict | None:
+    """Retry a status UPDATE once in a fresh session; NEVER retry publication."""
+    for attempt in range(2):
+        try:
+            async with SessionLocal() as session:
+                row = (await session.execute(text(sql), params)).scalar_one_or_none()
+                await session.commit()
+                return row
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("queue DB finalization failed attempt=%s error=%s",
+                           attempt + 1, type(exc).__name__)
+            if attempt == 1:
+                raise
+            await asyncio.sleep(0.25)
+    return None
+
+
+async def _record_legacy_status(
+    queue_id: int, payload: dict, *, provider_status: str,
+    provider_post_id: str | None = None, reason: str = "",
+) -> None:
+    """Legacy bookkeeping can fail without rolling back the durable queue."""
+    try:
+        async with SessionLocal() as session:
+            await _update_legacy_post(session, payload, provider_status=provider_status,
+                                      provider_post_id=provider_post_id, reason=reason)
+            if provider_post_id:
+                session.add(ActivityLog(
+                    account_id=payload.get("local_account_id"), user_id=payload.get("owner_id"),
+                    action="zernio_published" if provider_status == "published" else "zernio_publish_accepted",
+                    detail=f"outbound_id={queue_id} zernio_post_id={provider_post_id} status={provider_status}",
+                    level="info",
+                ))
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("legacy post audit unavailable queue_id=%s error=%s", queue_id, type(exc).__name__)
 
 
 async def _mark_failed(queue_id: int, reason: str) -> None:
-    """Fail closed. No processing/failed row is eligible for automatic retry."""
+    """Fail closed. Neither a processing nor failed row can be republished."""
     safe_reason = reason[:500]
-    owner_id = None
-    async with SessionLocal() as session:
-        row = (await session.execute(text("""
-            UPDATE public.outbound_queue
-               SET status = 'failed', last_error = :reason,
-                   payload = payload || jsonb_build_object(
-                       'manual_review', TRUE, 'failed_at', NOW()
-                   ), updated_at = NOW()
-             WHERE id = :id AND provider = 'zernio' AND action_type = 'post'
-               AND status = 'processing'
-            RETURNING payload
-        """), {"id": queue_id, "reason": safe_reason})).scalar_one_or_none()
-        if row:
-            owner_id = row.get("owner_id")
-            await _update_legacy_post(session, row, provider_status="failed", reason=safe_reason)
-        await session.commit()
+    row = await _commit_queue_update("""
+        UPDATE public.outbound_queue
+           SET status = 'failed', last_error = :reason,
+               payload = payload || jsonb_build_object(
+                   'manual_review', TRUE, 'failed_at', NOW()
+               ), updated_at = NOW()
+         WHERE id = :id AND provider = 'zernio' AND action_type = 'post'
+           AND status = 'processing'
+        RETURNING payload
+    """, {"id": queue_id, "reason": safe_reason})
+    if not row:
+        return
+    await _record_legacy_status(queue_id, row, provider_status="failed", reason=safe_reason)
+    owner_id = row.get("owner_id")
     if isinstance(owner_id, int) and owner_id in settings.admin_ids:
         await _notify(owner_id, f"⚠️ پست صف {queue_id} نیازمند بررسی دستی است؛ بدون بررسی Zernio دوباره ارسال نکنید.", success=False)
 
@@ -294,41 +349,27 @@ async def _mark_sent(queue_id: int, result: dict, provider_account_id: str) -> N
     if status not in ("publishing", "published"):
         raise OutboundQueueError("وضعیت پاسخ Zernio نامشخص است؛ بررسی دستی لازم است.")
     provider_post_id = str(result["post_id"])
-    owner_id = None
-    async with SessionLocal() as session:
-        row = (await session.execute(text("""
-            UPDATE public.outbound_queue
-               SET status = 'sent', provider_job_id = :post_id,
-                   payload = payload || jsonb_build_object(
-                       'provider_status', :provider_status,
-                       'provider_account_id', :provider_account_id,
-                       'accepted_at', NOW(),
-                       'confirmed_at', CASE WHEN :confirmed THEN NOW() ELSE NULL END
-                   ), updated_at = NOW(), last_error = NULL
-             WHERE id = :id AND provider = 'zernio' AND action_type = 'post'
-               AND status = 'processing'
-            RETURNING payload
-        """), {
-            "id": queue_id, "post_id": provider_post_id,
-            "provider_status": status, "provider_account_id": provider_account_id,
-            "confirmed": status == "published",
-        })).scalar_one_or_none()
-        if row:
-            owner_id = row.get("owner_id")
-            await _update_legacy_post(session, row, provider_status=status, provider_post_id=provider_post_id)
-            session.add(ActivityLog(
-                account_id=row.get("local_account_id"), user_id=owner_id,
-                action="zernio_published" if status == "published" else "zernio_publish_accepted",
-                detail=f"outbound_id={queue_id} zernio_post_id={provider_post_id} status={status}",
-                level="info",
-            ))
-        await session.commit()
-    if row and status == "published":
-        await _broadcast_legacy_post(row)
-    if isinstance(owner_id, int) and owner_id in settings.admin_ids:
-        message = ("✅ Zernio انتشار را تأیید کرد." if status == "published"
-                   else "⏳ Zernio درخواست را پذیرفت؛ انتشار نهایی هنوز تأیید نشده است.")
-        await _notify(owner_id, f"{message}\nشناسه صف: {queue_id}", success=True)
+    # JSON is explicitly typed for asyncpg. jsonb_build_object(:untyped) was
+    # the production error after Zernio returned 201; never reintroduce it.
+    patch = json.dumps({
+        "provider_status": "publishing",  # require GET of the exact Instagram target
+        "provider_response_status": status,
+        "provider_account_id": provider_account_id,
+        "accepted_at": datetime.now(timezone.utc).isoformat(),
+        "manual_review": False,
+    }, ensure_ascii=False)
+    row = await _commit_queue_update("""
+        UPDATE public.outbound_queue
+           SET status = 'sent', provider_job_id = :post_id,
+               payload = payload || CAST(:patch AS jsonb),
+               updated_at = NOW(), last_error = NULL
+         WHERE id = :id AND provider = 'zernio' AND action_type = 'post'
+           AND status = 'processing'
+        RETURNING payload
+    """, {"id": queue_id, "post_id": provider_post_id, "patch": patch})
+    if row:
+        await _record_legacy_status(queue_id, row, provider_status="publishing",
+                                    provider_post_id=provider_post_id)
 
 
 async def _update_legacy_post(
@@ -364,18 +405,74 @@ async def _broadcast_legacy_post(payload: dict) -> None:
         logger.warning("post refresh unavailable id=%s error=%s", post_id, type(exc).__name__)
 
 
-async def _notify(owner_id: int, text_value: str, *, success: bool) -> None:
-    """Best-effort only; notification failure must never re-issue a POST."""
+async def _notify(owner_id: int, text_value: str, *, success: bool) -> bool:
+    """Plain bot.send_message only: never touch Telegram FSM or queue status."""
     try:
         from app.services.notifications import notify_telegram
 
         async with SessionLocal() as session:
-            await notify_telegram(
+            return await notify_telegram(
                 session, owner_id, text_value,
                 kind="publish_success" if success else "publish_failed",
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning("outbound notification unavailable owner=%s error=%s", owner_id, type(exc).__name__)
+        return False
+
+
+async def deliver_one_confirmed_notification(queue_id: int | None = None) -> bool:
+    """Claim a durable success notice BEFORE a plain Telegram send_message.
+
+    A killed worker after confirmation leaves the pending flag for the next
+    idle cron tick. Once claimed, an ambiguous Telegram timeout is not retried
+    automatically; avoiding duplicate chat messages cannot be guaranteed
+    simultaneously with guaranteed delivery by Telegram's non-idempotent API.
+    """
+    if queue_id is None:
+        async with SessionLocal() as session:
+            queue_id = (await session.execute(text("""
+                SELECT id FROM public.outbound_queue
+                 WHERE provider = 'zernio' AND action_type = 'post'
+                   AND status = 'sent' AND payload->>'provider_status' = 'published'
+                   AND payload->>'success_notification_pending' = 'true'
+                   AND NOT (payload ? 'success_notification_attempted_at')
+                 ORDER BY updated_at ASC LIMIT 1
+            """))).scalar_one_or_none()
+    if queue_id is None:
+        return False
+    row = await _commit_queue_update("""
+        UPDATE public.outbound_queue
+           SET payload = payload || jsonb_build_object(
+                   'success_notification_attempted_at', NOW()
+               ), updated_at = NOW()
+         WHERE id = :id AND provider = 'zernio' AND action_type = 'post'
+           AND status = 'sent' AND payload->>'provider_status' = 'published'
+           AND payload->>'success_notification_pending' = 'true'
+           AND NOT (payload ? 'success_notification_attempted_at')
+        RETURNING payload
+    """, {"id": queue_id})
+    if not row:
+        return False  # another invocation claimed it; never send twice
+    owner = row.get("owner_id")
+    if not isinstance(owner, int) or owner not in settings.admin_ids:
+        logger.warning("post notification suppressed: owner not authorized queue_id=%s", queue_id)
+        return False
+    delivered = await _notify(owner, "پست شما با موفقیت منتشر شد", success=True)
+    if delivered:
+        try:
+            await _commit_queue_update("""
+                UPDATE public.outbound_queue
+                   SET payload = payload || jsonb_build_object(
+                           'success_notification_sent_at', NOW()
+                       ), updated_at = NOW()
+                 WHERE id = :id AND provider = 'zernio' AND action_type = 'post'
+                   AND status = 'sent' AND payload ? 'success_notification_attempted_at'
+                RETURNING payload
+            """, {"id": queue_id})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("post notification delivered but audit failed queue_id=%s error=%s",
+                           queue_id, type(exc).__name__)
+    return delivered
 
 
 async def refresh_one_accepted_post(queue_id: int | None = None, owner_id: int | None = None) -> dict | None:
@@ -424,46 +521,135 @@ async def refresh_one_accepted_post(queue_id: int | None = None, owner_id: int |
     status = remote["status"]
     if status not in ("published", "publishing", "failed", "partial"):
         return job
-    async with SessionLocal() as session:
-        changed = (await session.execute(text("""
-            UPDATE public.outbound_queue
-               SET status = CASE WHEN :failed THEN 'failed' ELSE 'sent' END,
-                   last_error = CASE WHEN :failed THEN :error ELSE NULL END,
-                   payload = payload || jsonb_build_object(
-                       'provider_status', :provider_status,
-                       'last_checked_at', NOW(),
-                       'confirmed_at', CASE WHEN :confirmed THEN NOW()
-                                            ELSE payload->'confirmed_at' END,
-                       'provider_published_at',
-                            CASE WHEN :confirmed THEN CAST(:published_at AS timestamptz)
+    failed = status in ("failed", "partial")
+    patch = {
+        "provider_status": status,
+        "last_checked_at": datetime.now(timezone.utc).isoformat(),
+        "manual_review": failed,
+    }
+    if status == "published":
+        patch.update({
+            "confirmed_at": datetime.now(timezone.utc).isoformat(),
+            "provider_published_at": remote.get("published_at"),
+            "success_notification_pending": True,
+        })
+    # Explicit jsonb cast fixes the same asyncpg unknown-parameter failure in
+    # the *second* status path; CAS prevents double Telegram notifications.
+    changed = await _commit_queue_update("""
+        UPDATE public.outbound_queue
+           SET status = CASE WHEN CAST(:failed AS boolean) THEN 'failed' ELSE 'sent' END,
+               last_error = CASE WHEN CAST(:failed AS boolean) THEN CAST(:error AS text)
                                  ELSE NULL END,
-                       'manual_review', :failed
-                   ), updated_at = NOW()
-             WHERE id = :id AND status = 'sent' AND provider_job_id = :post_id
-            RETURNING payload
-        """), {
-            "id": job["id"], "post_id": job["provider_job_id"],
-            "provider_status": status,
-            "failed": status in ("failed", "partial"),
-            "confirmed": status == "published",
-            "published_at": remote.get("published_at"),
-            "error": "Zernio انتشار نهایی را ناموفق گزارش کرد؛ قبل از هر تلاش دوباره بررسی کنید.",
-        })).scalar_one_or_none()
-        if changed and status in ("published", "failed", "partial"):
-            await _update_legacy_post(
-                session, changed,
-                provider_status="failed" if status != "published" else "published",
-                provider_post_id=job["provider_job_id"],
-                reason="انتشار در Zernio نهایی نشد؛ بررسی دستی لازم است.",
-            )
-        await session.commit()
+               payload = payload || CAST(:patch AS jsonb), updated_at = NOW()
+         WHERE id = :id AND provider = 'zernio' AND action_type = 'post'
+           AND status = 'sent' AND provider_job_id = :post_id
+           AND payload->>'provider_status' = 'publishing'
+        RETURNING payload
+    """, {
+        "id": job["id"], "post_id": job["provider_job_id"],
+        "patch": json.dumps(patch, ensure_ascii=False), "failed": failed,
+        "error": "Zernio انتشار نهایی را ناموفق گزارش کرد؛ قبل از هر تلاش دوباره بررسی کنید.",
+    })
     if changed and status in ("published", "failed", "partial"):
+        await _record_legacy_status(
+            job["id"], changed, provider_status="published" if status == "published" else "failed",
+            provider_post_id=job["provider_job_id"] if status == "published" else None,
+            reason="انتشار در Zernio نهایی نشد؛ بررسی دستی لازم است.",
+        )
         if status == "published":
             await _broadcast_legacy_post(changed)
-        who = changed.get("owner_id")
-        if isinstance(who, int) and who in settings.admin_ids:
-            message = ("✅ Zernio انتشار نهایی را تأیید کرد."
-                       if status == "published" else "⚠️ Zernio انتشار نهایی را ناموفق گزارش کرد؛ بررسی دستی لازم است.")
-            await _notify(who, f"{message}\nشناسه صف: {job['id']}", success=status == "published")
+            try:
+                await deliver_one_confirmed_notification(job["id"])
+            except Exception as exc:  # noqa: BLE001
+                # Outcome was committed first; an idle tick can send pending.
+                logger.warning("post notification deferred queue_id=%s error=%s",
+                               job["id"], type(exc).__name__)
+        else:
+            who = changed.get("owner_id")
+            if isinstance(who, int) and who in settings.admin_ids:
+                await _notify(who, "⚠️ Zernio انتشار نهایی را ناموفق گزارش کرد؛ بررسی دستی لازم است.", success=False)
     async with SessionLocal() as session:
         return await get_owned_post(session, job["id"], int(payload["owner_id"]))
+
+
+async def reconcile_one_stalled_processing_post(
+    queue_id: int | None = None, owner_id: int | None = None,
+) -> dict | None:
+    """Recover ONE interrupted job using Zernio GET/list, never another POST.
+
+    Called on an idle cron tick or a private admin status refresh. If there is
+    no unique verified match after 15 minutes, mark the result *uncertain* for
+    manual review. No processing/failed row ever returns to pending.
+    """
+    async with SessionLocal() as session:
+        if queue_id is not None and owner_id is not None:
+            job = await get_owned_post(session, queue_id, owner_id)
+        elif queue_id is None and owner_id is None:
+            row = (await session.execute(text("""
+                SELECT id, idempotency_key, status, scheduled_for, attempts,
+                       last_error, provider_job_id, created_at, updated_at, payload
+                  FROM public.outbound_queue
+                 WHERE provider = 'zernio' AND action_type = 'post'
+                   AND status = 'processing' AND provider_job_id IS NULL
+                   AND attempts = 1 AND max_attempts = 1
+                   AND updated_at < NOW() - INTERVAL '2 minutes'
+                   AND created_at > NOW() - INTERVAL '14 days'
+                 ORDER BY updated_at ASC LIMIT 1
+            """))).mappings().first()
+            job = dict(row) if row else None
+        else:
+            raise ValueError("specify both queue_id and owner_id, or neither")
+    if not job or job["status"] != "processing" or job["provider_job_id"]:
+        return job
+    now = datetime.now(timezone.utc)
+    if (job["updated_at"] > now - timedelta(minutes=2)
+            or job["created_at"] < now - timedelta(days=14)):
+        return job  # the original worker might still be executing
+    age = now - job["updated_at"]
+    reason = "نتیجه انتشار نامشخص است؛ شناسهٔ یکتای Zernio پیدا یا تأیید نشد. بدون بررسی دستی دوباره ارسال نکنید."
+    payload = job["payload"] or {}
+    owner = payload.get("owner_id")
+    account_id = payload.get("local_account_id")
+    username = payload.get("expected_username")
+    try:
+        if (not isinstance(owner, int) or owner not in settings.admin_ids
+                or (owner_id is not None and owner != owner_id)
+                or not isinstance(account_id, int) or not normalize_username(username)):
+            raise OutboundQueueError("مالکیت درخواست صف نامعتبر است.")
+        async with SessionLocal() as session:
+            account = await session.get(InstagramAccount, account_id)
+            if (account is None or account.owner_id != owner
+                    or normalize_username(account.username) != username):
+                raise OutboundQueueError("پیج صف دیگر با مالکیت ثبت‌شده مطابق نیست.")
+        publisher = get_zernio_publisher()
+        providers = await publisher.list_instagram_accounts()  # GET only
+        matches = [a for a in providers if a["active"]
+                   and normalize_username(a["username"]) == username]
+        if len(matches) != 1:
+            raise OutboundQueueError("پیج مقصد در Zernio یکتا و فعال نیست.")
+        content = payload.get("caption")
+        if payload.get("media_type") == "story":
+            content = content or "استوری"
+        post_id = await publisher.find_queued_post(
+            account_id=matches[0]["id"], idempotency_key=job["idempotency_key"],
+            content=content, queued_at=job["created_at"],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stalled post GET unavailable queue_id=%s error=%s", job["id"], type(exc).__name__)
+        post_id = None
+    if post_id:
+        # The list gives a uniquely matching provider ID. Commit acceptance
+        # first; a separate GET verifies both post and Instagram target status.
+        await _mark_sent(job["id"], {"post_id": post_id, "status": "publishing"}, matches[0]["id"])
+        try:
+            return await refresh_one_accepted_post(job["id"], owner)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("recovered post confirmation deferred queue_id=%s error=%s",
+                           job["id"], type(exc).__name__)
+            async with SessionLocal() as session:
+                return await get_owned_post(session, job["id"], owner)
+    if age >= timedelta(minutes=15):
+        await _mark_failed(job["id"], reason)
+        async with SessionLocal() as session:
+            return await get_owned_post(session, job["id"], owner) if isinstance(owner, int) else None
+    return job
