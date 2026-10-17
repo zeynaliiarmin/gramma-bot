@@ -399,7 +399,10 @@ class ZernioPublisher:
         try:
             async with self._client_factory() as client:
                 response = await client.posts.acreate(
-                    content=caption.strip() if media_type != "story" else (caption.strip() or "استوری"),
+                    # The API explicitly allows missing content when media is
+                    # attached. The SDK filters None from the payload, avoiding
+                    # an ambiguous empty-string caption after an intentional move.
+                    content=(caption.strip() or None) if media_type != "story" else (caption.strip() or "استوری"),
                     platforms=[platform],
                     media_items=items,
                     is_draft=False,
