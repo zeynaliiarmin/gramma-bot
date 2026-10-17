@@ -170,11 +170,12 @@ def test_full_menu_has_all_capabilities():
     datas = [b.callback_data for row in full_menu().inline_keyboard for b in row]
     # Every capability is present, and every callback_data has a handler.
     expected = {
-        "publish:menu", "publish:new:reel", "publish:new:story",
+        "publish:wait:post", "publish:wait:reel", "publish:menu", "publish:new:story",
         "community:comments", "direct:menu", "calendar:menu",
-        "collab:menu", "insights:menu", "settings:menu", "webapp:open",
+        "insights:menu", "settings:menu", "webapp:open",
     }
     assert expected <= set(datas)
+    assert "collab:menu" not in datas
 
 
 def test_full_menu_callbacks_have_handlers():

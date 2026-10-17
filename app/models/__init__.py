@@ -24,7 +24,7 @@ from app.services.reply_limits import (  # noqa: F401
     SafetyAlert,
 )
 from app.services.templates import PostTemplate  # noqa: F401
-from app.models.telegram_draft import TelegramPostDraft  # noqa: F401
+from app.models.telegram_draft import TelegramMediaIntent, TelegramPostDraft  # noqa: F401
 
 __all__ = [
     "User",
@@ -48,4 +48,5 @@ __all__ = [
     "DailyReplyCounter",
     "SafetyAlert",
     "TelegramPostDraft",
+    "TelegramMediaIntent",
 ]

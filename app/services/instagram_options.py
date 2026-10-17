@@ -10,7 +10,11 @@ import math
 import re
 from typing import Any
 
-from app.services.limits import TELEGRAM_POST_COLLABORATOR_LIMIT, TELEGRAM_POST_USER_TAG_LIMIT
+from app.services.limits import (
+    TELEGRAM_POST_COLLABORATOR_LIMIT,
+    TELEGRAM_POST_USER_TAG_LIMIT,
+    TELEGRAM_SHORT_ON_POST_CAPTION_LIMIT,
+)
 
 
 class InstagramOptionError(ValueError):
@@ -33,7 +37,7 @@ def validate_instagram_options(
     """Return only documented fields, canonicalized and checked per slide."""
     if options is None:
         return {}
-    if not isinstance(options, dict) or set(options) - {"locationId", "userTags", "collaborators", "firstComment"}:
+    if not isinstance(options, dict) or set(options) - {"locationId", "userTags", "collaborators", "firstComment", "shareToFeed"}:
         raise InstagramOptionError("تنظیمات انتشار ناشناخته یا نامعتبر است.")
     if not options:
         return {}
@@ -45,6 +49,13 @@ def validate_instagram_options(
             or (media_type != "carousel" and len(media_kinds) != 1)):
         raise InstagramOptionError("ترکیب رسانه برای تنظیمات این پست معتبر نیست.")
     result: dict[str, Any] = {}
+
+    if "shareToFeed" in options:
+        # This is injected by the queue/adapter for every Reel, not an
+        # editable user setting. False and non-Reel placements are rejected.
+        if media_type != "reel" or options["shareToFeed"] is not True:
+            raise InstagramOptionError("نمایش ریلز در فید باید فعال باشد.")
+        result["shareToFeed"] = True
 
     if "locationId" in options:
         value = options["locationId"]
@@ -105,3 +116,28 @@ def validate_instagram_options(
         result["firstComment"] = comment.strip()
 
     return result
+
+
+def validate_instagram_caption(
+    caption: str, *, media_type: str, options: dict[str, Any],
+    caption_moved_to_comment: bool = False,
+) -> str:
+    """Allow a blank feed caption only after a deliberate, guarded move.
+
+    Shared by enqueue, Worker preflight and the provider adapter. A mere
+    firstComment supplied manually is NOT permission for an empty post.
+    """
+    if not isinstance(caption, str) or len(caption) > 2200:
+        raise InstagramOptionError("کپشن باید حداکثر 2200 نویسه باشد.")
+    if type(caption_moved_to_comment) is not bool:
+        raise InstagramOptionError("وضعیت انتقال کپشن معتبر نیست.")
+    if caption_moved_to_comment:
+        if (media_type not in ("post", "carousel")
+                or not isinstance(options.get("firstComment"), str)
+                or not 0 < len(options["firstComment"].strip()) <= 2200
+                or len(caption) > TELEGRAM_SHORT_ON_POST_CAPTION_LIMIT
+                or (caption and not caption.strip())):
+            raise InstagramOptionError("کپشن منتقل‌شده به اولین کامنت یا متن کوتاهِ روی پست معتبر نیست.")
+    elif media_type != "story" and not caption.strip():
+        raise InstagramOptionError("برای این پست کپشن غیرخالی لازم است.")
+    return caption.strip()

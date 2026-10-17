@@ -24,7 +24,9 @@ from zernio import (
 )
 
 from app.core.config import get_settings
-from app.services.instagram_options import InstagramOptionError, validate_instagram_options
+from app.services.instagram_options import (
+    InstagramOptionError, validate_instagram_caption, validate_instagram_options,
+)
 from app.utils import jalali
 
 logger = logging.getLogger("gramma.zernio")
@@ -78,7 +80,7 @@ def _media_items(urls: list[str], kind: str) -> list[dict[str, str]]:
     if kind != "carousel" and len(items) != 1:
         raise ZernioPublishError("برای این نوع محتوا دقیقاً 1 رسانه لازم است.")
     if kind == "post" and items[0]["type"] != "image":
-        raise ZernioPublishError("برای ویدیو گزینه ریلز را انتخاب کنید.")
+        raise ZernioPublishError("ویدیوی تکی در مسیر فعلی Zernio به‌شکل ریلز با نمایش در فید ارسال می‌شود، نه پست تصویری.")
     if kind == "reel" and items[0]["type"] != "video":
         raise ZernioPublishError("ریلز به فایل ویدیویی MP4 یا MOV نیاز دارد.")
     return items
@@ -309,7 +311,13 @@ class ZernioPublisher:
             raise ZernioPublishError("پاسخ فهرست پست‌های Zernio معتبر نیست.", 502)
         matches = []
         for post in posts:
-            if not isinstance(post, dict) or post.get("content") != content:
+            if not isinstance(post, dict):
+                continue
+            # A deliberately blank visible caption can be echoed as an
+            # omitted/null field by the provider. Still require the exact
+            # idempotency metadata, account and bounded creation time below.
+            remote_content = post.get("content")
+            if remote_content != content and not (content == "" and remote_content is None):
                 continue
             metadata = post.get("metadata")
             if not isinstance(metadata, dict) or metadata.get("idempotencyKey") != idempotency_key:
@@ -346,6 +354,7 @@ class ZernioPublisher:
         idempotency_key: str,
         media_type: str = "post",
         platform_specific_data: dict[str, Any] | None = None,
+        caption_moved_to_comment: bool = False,
     ) -> dict[str, Any]:
         """Submit one real post for immediate publication, never a draft/mock.
 
@@ -357,16 +366,20 @@ class ZernioPublisher:
             raise ZernioPublishError("کلید جلوگیری از انتشار تکراری لازم است.")
         if media_type not in ("post", "story", "reel", "carousel"):
             raise ZernioPublishError("نوع محتوا نامعتبر است.")
-        if not isinstance(caption, str) or len(caption) > 2200 or (not caption.strip() and media_type != "story"):
-            raise ZernioPublishError("برای پست/ریلز/کاروسل کپشن تا 2200 نویسه لازم است.")
         items = _media_items(media_urls, media_type)
         try:
             safe_options = validate_instagram_options(
                 platform_specific_data, media_type=media_type,
                 media_kinds=[item["type"] for item in items],
             )
+            validate_instagram_caption(
+                caption, media_type=media_type, options=safe_options,
+                caption_moved_to_comment=caption_moved_to_comment,
+            )
         except InstagramOptionError as exc:
             raise ZernioPublishError(str(exc)) from exc
+        if media_type == "reel":
+            safe_options["shareToFeed"] = True
         if not zernio_account_id or not normalize_username(expected_username):
             raise ZernioPublishError("اکانت Zernio نامعتبر است.", 403)
 

@@ -1,14 +1,8 @@
-"""Gramma — publishing handlers (photo / video / reel / carousel / story).
+"""Legacy Story dialog and historical scheduling callbacks.
 
-Flow:
-  1. user picks content type;
-  2. we ask for the media file (photo/video);
-  3. caption comes from the file caption or from the AI caption topic;
-  4. user picks "publish now" or "schedule";
-  5. a `Post` row is created; the background publisher handles it.
-
-All real publication is delegated to Zernio. Media must have a public HTTPS
-URL; local files without a configured CDN cannot be submitted to Zernio.
+Private admin Post/Reel/carousel media now uses the serverless-durable
+telegram_drafts router, not this in-memory FSM or a direct queue insert.
+All real publication remains delegated to the existing Zernio worker.
 """
 
 from __future__ import annotations
@@ -37,6 +31,7 @@ from app.db.repositories import (
 )
 from app.models import Media, Post
 from app.services.media_storage import save_downloaded_media, save_downloaded_media_serverless
+from app.services.telegram_post_drafts import clear_pending_media_intent
 
 settings = get_settings()
 router = Router(name="publish")
@@ -53,6 +48,7 @@ KIND_LABEL = {
 @router.callback_query(F.data == "publish:menu")
 async def cb_publish_menu(callback: CallbackQuery, state: FSMContext):
     await state.clear()
+    await clear_pending_media_intent(callback.from_user.id, callback.message.chat.id)
     await callback.message.edit_text("📤 <b>انتشار محتوا</b>", reply_markup=publish_menu())
     await callback.answer()
 
@@ -60,6 +56,12 @@ async def cb_publish_menu(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("publish:new:"))
 async def cb_publish_new(callback: CallbackQuery, state: FSMContext):
     kind = callback.data.split(":", 2)[2]
+    # Photo/video/Post/Reel (including old visible buttons) are handled by
+    # the earlier durable draft router. The legacy FSM remains for Story only.
+    if kind != "story":
+        await callback.answer("از دکمهٔ جدید پست یا ریلز استفاده کنید.")
+        return
+    await clear_pending_media_intent(callback.from_user.id, callback.message.chat.id)
     await state.update_data(publish_kind=kind)
 
     # Multi-page support: pick the ACTIVE page (switchable in /settings).
@@ -203,7 +205,8 @@ async def cb_carousel_done(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "publish:confirm")
 async def cb_publish_confirm(callback: CallbackQuery):
-    """Used by the AI-caption flow to go publish immediately."""
+    """Used by the AI-caption flow to open the publish menu."""
+    await clear_pending_media_intent(callback.from_user.id, callback.message.chat.id)
     await callback.message.edit_text(
         "رسانه را بفرستید:", reply_markup=publish_menu()
     )

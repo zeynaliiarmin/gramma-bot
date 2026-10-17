@@ -22,9 +22,10 @@ if TYPE_CHECKING:
 
 
 MAIN_KB = [
+    ("📸 پست", "publish:wait:post"),
+    ("🎬 ریلز", "publish:wait:reel"),
     ("📤 انتشار محتوا", "publish:menu"),
     ("📅 تقویم محتوا", "calendar:menu"),
-    ("🤝 پست کلبریشن", "collab:menu"),
     ("💬 کامیونیتی", "community:menu"),
     ("📥 دایرکت", "direct:menu"),
     ("🔍 جستجوی هوشمند", "search:menu"),
@@ -36,13 +37,13 @@ MAIN_KB = [
 # The complete menu (all capabilities) opened by the persistent "منوی کامل"
 # button and the /start welcome screen. Every callback_data here is handled.
 FULL_KB = [
+    ("📸 پست", "publish:wait:post"),
+    ("🎬 ریلز", "publish:wait:reel"),
     ("📤 انتشار", "publish:menu"),
-    ("🛰 ریلز", "publish:new:reel"),
     ("📸 استوری", "publish:new:story"),
     ("💬 کامنت‌ها", "community:comments"),
     ("📥 دایرکت", "direct:menu"),
     ("📅 تقویم", "calendar:menu"),
-    ("🤝 کلبریشن", "collab:menu"),
     ("📈 آمار پیج", "insights:menu"),
     ("🛠 تنظیمات", "settings:menu"),
     ("🖥 پنل مدیریت", "webapp:open"),
@@ -96,9 +97,8 @@ def with_back(markup: InlineKeyboardMarkup, target: str = "home") -> InlineKeybo
 def publish_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     for text, cb in [
-        ("🖼 عکس", "publish:new:photo"),
-        ("🎬 ویدیو / ریلز", "publish:new:video"),
-        ("🌀 کاروسل", "publish:new:carousel"),
+        ("📸 پست", "publish:wait:post"),
+        ("🎬 ریلز", "publish:wait:reel"),
         ("📸 استوری", "publish:new:story"),
         ("🕰 پست‌های زمان‌بندی‌شده", "schedule:list"),
     ]:
@@ -109,13 +109,12 @@ def publish_menu() -> InlineKeyboardMarkup:
 
 
 def kind_select() -> InlineKeyboardMarkup:
+    """Legacy submenu, kept for callers without a direct-media type question."""
     b = InlineKeyboardBuilder()
     for text, cb in [
-        ("🖼 عکس", "publish:new:photo"),
-        ("🎬 ویدیو", "publish:new:video"),
-        ("🌀 کاروسل", "publish:new:carousel"),
+        ("📸 پست", "publish:wait:post"),
+        ("🎬 ریلز", "publish:wait:reel"),
         ("📸 استوری", "publish:new:story"),
-        ("🛰 ریلز", "publish:new:reel"),
     ]:
         b.button(text=text, callback_data=cb)
     b.adjust(3)

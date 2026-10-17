@@ -18,7 +18,7 @@ from sqlalchemy import and_, or_, select, text
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.db.repositories import get_active_account
-from app.models import InstagramAccount, TelegramPostDraft
+from app.models import InstagramAccount, TelegramMediaIntent, TelegramPostDraft
 from app.services.instagram_options import (
     InstagramOptionError,
     instagram_username,
@@ -30,8 +30,10 @@ from app.services.limits import (
     TELEGRAM_ALBUM_QUIET_SECONDS,
     TELEGRAM_ALBUM_DRAFTS_PER_TICK,
     TELEGRAM_DRAFT_EXPIRY_DAYS,
+    TELEGRAM_MEDIA_INTENT_EXPIRY_DAYS,
     TELEGRAM_POST_COLLABORATOR_LIMIT,
     TELEGRAM_POST_USER_TAG_LIMIT,
+    TELEGRAM_SHORT_ON_POST_CAPTION_LIMIT,
 )
 from app.services.outbound_queue import (
     OutboundQueueError,
@@ -80,12 +82,18 @@ def ordered_media(draft: TelegramPostDraft) -> list[dict]:
 
 def draft_media_type(draft: TelegramPostDraft) -> str:
     media = ordered_media(draft)
+    if draft.media_intent not in ("auto", "post", "reel"):
+        raise TelegramDraftError("حالت انتخاب رسانه معتبر نیست.")
     if draft.media_group_id is not None:
+        if draft.media_intent == "reel":
+            raise TelegramDraftError("ریلز فقط یک ویدیوی تکی می‌پذیرد.")
         if not TELEGRAM_ALBUM_MIN_ITEMS <= len(media) <= TELEGRAM_ALBUM_MAX_ITEMS:
             raise TelegramDraftError("آلبوم باید بین 2 تا 10 اسلاید داشته باشد.")
         return "carousel"
-    if len(media) != 1:
-        raise TelegramDraftError("رسانهٔ تکی باید دقیقاً یک فایل داشته باشد.")
+    if len(media) != 1 or media[0].get("kind") not in ("image", "video"):
+        raise TelegramDraftError("رسانهٔ تکی باید دقیقاً یک عکس یا ویدیو داشته باشد.")
+    if draft.media_intent == "reel" and media[0]["kind"] != "video":
+        raise TelegramDraftError("ریلز فقط یک ویدیوی تکی می‌پذیرد.")
     return "reel" if media[0]["kind"] == "video" else "post"
 
 
@@ -109,6 +117,53 @@ async def get_owned_draft(draft_id: int, owner_id: int, chat_id: int) -> Telegra
     async with SessionLocal() as session:
         draft = await session.get(TelegramPostDraft, draft_id)
         return _owned(draft, owner_id, chat_id)
+
+
+async def set_pending_media_intent(owner_id: int, chat_id: int, mode: str) -> str:
+    """Store a private Post/Reel selection across webhook invocations."""
+    if owner_id != chat_id or owner_id not in settings.admin_ids or mode not in ("post", "reel"):
+        raise TelegramDraftError("انتخاب رسانه فقط برای مدیر در چت خصوصی مجاز است.")
+    async with SessionLocal() as session:
+        account = await get_active_account(session, owner_id)
+        if (account is None or account.owner_id != owner_id or account.status != "connected"
+                or not normalize_username(account.username)):
+            raise TelegramDraftError("پیج فعال و متصلِ متعلق به مدیر پیدا نشد.")
+        await session.execute(text("""
+            INSERT INTO public.telegram_media_intents
+                (chat_id, owner_id, mode, selected_at, expires_at)
+            VALUES (:chat, :owner, :mode, NOW(), :expiry)
+            ON CONFLICT (chat_id) DO UPDATE
+                SET mode = EXCLUDED.mode, owner_id = EXCLUDED.owner_id,
+                    selected_at = EXCLUDED.selected_at,
+                    expires_at = EXCLUDED.expires_at
+        """), {"chat": chat_id, "owner": owner_id, "mode": mode,
+               "expiry": _now() + timedelta(days=TELEGRAM_MEDIA_INTENT_EXPIRY_DAYS)})
+        await session.commit()
+        return normalize_username(account.username)
+
+
+async def clear_pending_media_intent(owner_id: int, chat_id: int) -> None:
+    """Navigation cancels only the waiting choice, never an existing draft."""
+    if owner_id != chat_id or owner_id not in settings.admin_ids:
+        return
+    async with SessionLocal() as session:
+        await session.execute(text("""
+            DELETE FROM public.telegram_media_intents
+             WHERE chat_id = :chat AND owner_id = :owner
+        """), {"chat": chat_id, "owner": owner_id})
+        await session.commit()
+
+
+async def get_pending_media_intent(owner_id: int, chat_id: int) -> str | None:
+    """Read-only mode lookup for a helpful rejection of unsupported files."""
+    if owner_id != chat_id or owner_id not in settings.admin_ids:
+        return None
+    async with SessionLocal() as session:
+        row = await session.get(TelegramMediaIntent, chat_id)
+        if (row is not None and row.owner_id == owner_id
+                and _aware(row.expires_at) > _now() and row.mode in ("post", "reel")):
+            return row.mode
+    return None
 
 
 async def _cancel_pending_album(session, draft: TelegramPostDraft) -> bool:
@@ -151,6 +206,21 @@ async def reserve_telegram_media(
         ))).scalar_one_or_none()
         created = False
         if existing is None:
+            # Lock the durable waiting choice before creating a draft. The
+            # first accepted fragment consumes it in the same transaction;
+            # subsequent album fragments use the stored draft intent, not a
+            # newer button selection meant for a different upload.
+            intent = (await session.execute(select(TelegramMediaIntent).where(
+                TelegramMediaIntent.chat_id == chat_id,
+                TelegramMediaIntent.owner_id == owner_id,
+            ).with_for_update())).scalar_one_or_none()
+            mode = (intent.mode if intent and _aware(intent.expires_at) > _now() else "auto")
+            if media_info["kind"] not in ("image", "video"):
+                raise TelegramDraftError("برای پیش‌نویس فقط عکس یا ویدیو معتبر است.")
+            if mode == "reel" and media_group_id is not None:
+                raise TelegramDraftError("ریلز فقط یک ویدیوی تکی می‌پذیرد؛ آلبوم را در حالت پست بفرستید.")
+            if mode == "reel" and media_info["kind"] != "video":
+                raise TelegramDraftError("ریلز فقط ویدیوی عمودی تکی می‌پذیرد؛ لطفاً ویدیو بفرستید.")
             account = await get_active_account(session, owner_id)
             if account is None or account.owner_id != owner_id or account.status != "connected":
                 raise TelegramDraftError("پیج فعال و متصلِ متعلق به مدیر پیدا نشد.")
@@ -159,14 +229,16 @@ async def reserve_telegram_media(
             created = (await session.execute(text("""
                 INSERT INTO public.telegram_post_drafts
                     (source_key, owner_id, chat_id, local_account_id,
-                     expected_username, media_group_id, expires_at)
-                VALUES (:key, :owner, :chat, :account, :username, :group_id, :expiry)
+                     expected_username, media_group_id, media_intent, expires_at)
+                VALUES (:key, :owner, :chat, :account, :username, :group_id, :mode, :expiry)
                 ON CONFLICT (source_key) DO NOTHING RETURNING id
             """), {
                 "key": key, "owner": owner_id, "chat": chat_id, "account": account.id,
                 "username": normalize_username(account.username), "group_id": media_group_id,
-                "expiry": _now() + timedelta(days=TELEGRAM_DRAFT_EXPIRY_DAYS),
+                "mode": mode, "expiry": _now() + timedelta(days=TELEGRAM_DRAFT_EXPIRY_DAYS),
             })).scalar_one_or_none() is not None
+            if created and intent is not None:
+                await session.delete(intent)
         draft = (await session.execute(select(TelegramPostDraft).where(
             TelegramPostDraft.source_key == key
         ).with_for_update())).scalar_one()
@@ -208,7 +280,14 @@ async def reserve_telegram_media(
             # A newly arrived lower message_id shifts slide numbers: discard
             # tags rather than silently tagging the wrong person/media.
             draft.status = "collecting"
-            draft.options = {k: v for k, v in (draft.options or {}).items() if k != "userTags"}
+            discarded = {"userTags"}
+            if draft.caption_moved_to_comment:
+                # A new slide can change the final album caption. Do not keep
+                # an old comment that no longer matches the original caption.
+                discarded.add("firstComment")
+                draft.caption_moved_to_comment = False
+                draft.visible_caption = None
+            draft.options = {k: v for k, v in (draft.options or {}).items() if k not in discarded}
             draft.panel_message_id = None
             draft.prompt_message_id = None
             draft.prompt_kind = None
@@ -424,7 +503,7 @@ async def attach_prompt(
     draft_id: int, owner_id: int, chat_id: int, panel_message_id: int,
     *, kind: str, slide: int | None, prompt_message_id: int,
 ) -> bool:
-    if kind not in ("caption", "location", "tag", "collaborators", "first_comment"):
+    if kind not in ("caption", "location", "tag", "collaborators", "first_comment", "short_caption"):
         return False
     async with SessionLocal() as session:
         draft = (await session.execute(select(TelegramPostDraft).where(
@@ -434,6 +513,10 @@ async def attach_prompt(
         if draft.status != "ready" or draft.panel_message_id != panel_message_id:
             return False
         _live(draft)
+        if kind == "first_comment" and draft.caption_moved_to_comment:
+            return False
+        if kind == "short_caption" and not draft.caption_moved_to_comment:
+            return False
         draft.prompt_message_id = prompt_message_id
         draft.prompt_kind = kind
         draft.prompt_slide = slide if kind == "tag" else None
@@ -464,10 +547,19 @@ async def apply_draft_reply(
             if len(raw) > 2200:
                 raise TelegramDraftError("کپشن باید حداکثر 2200 نویسه باشد.")
             draft.caption = raw
+            if draft.caption_moved_to_comment:
+                # Editing the original must also edit the future first comment.
+                options["firstComment"] = raw
             draft.caption_from_reply = True
             draft.error_text = None
             draft.notify_attempts = 0
             draft.last_prompt_at = None
+        elif kind == "short_caption":
+            if not draft.caption_moved_to_comment or media_type not in ("post", "carousel"):
+                raise TelegramDraftError("کپشن کوتاه فقط پس از انتقال کپشن اصلی به اولین کامنت مجاز است.")
+            if len(raw) > TELEGRAM_SHORT_ON_POST_CAPTION_LIMIT:
+                raise TelegramDraftError(f"کپشن کوتاه روی پست باید حداکثر {TELEGRAM_SHORT_ON_POST_CAPTION_LIMIT} نویسه باشد.")
+            draft.visible_caption = raw
         elif kind == "location":
             options["locationId"] = raw
         elif kind == "collaborators":
@@ -476,6 +568,8 @@ async def apply_draft_reply(
                 raise TelegramDraftError("بین 1 تا 3 نام کاربری همکار وارد کنید.")
             options["collaborators"] = [instagram_username(name) for name in names]
         elif kind == "first_comment":
+            if draft.caption_moved_to_comment:
+                raise TelegramDraftError("کپشن اصلی به اولین کامنت منتقل شده است؛ ابتدا انتقال را لغو کنید.")
             options["firstComment"] = raw
         elif kind == "tag":
             name = instagram_username(raw)
@@ -524,6 +618,56 @@ async def invalidate_stale_panel(
         return True
 
 
+async def change_caption_move(
+    draft_id: int, owner_id: int, chat_id: int, panel_message_id: int,
+    *, action: str,
+) -> TelegramPostDraft:
+    """Move the ORIGINAL caption to a comment, restore it, or blank the post.
+
+    The source caption is retained on the private draft. Only feed/carousel can
+    use firstComment; a Reel never exposes this control. No queue insert here.
+    """
+    if action not in ("move", "restore", "empty"):
+        raise TelegramDraftError("دکمهٔ انتقال کپشن معتبر نیست.")
+    async with SessionLocal() as session:
+        draft = (await session.execute(select(TelegramPostDraft).where(
+            TelegramPostDraft.id == draft_id
+        ).with_for_update())).scalar_one_or_none()
+        _owned(draft, owner_id, chat_id)
+        _live(draft)
+        if draft.status != "ready" or draft.panel_message_id != panel_message_id:
+            raise TelegramDraftError("این پنل قدیمی است؛ چیزی تغییر نکرد.")
+        media_type = draft_media_type(draft)
+        if media_type not in ("post", "carousel"):
+            raise TelegramDraftError("انتقال کپشن به اولین کامنت فقط برای پست فید/کاروسل است.")
+        options = dict(draft.options or {})
+        if action == "move":
+            original = draft.caption.strip()
+            if not 0 < len(original) <= 2200:
+                raise TelegramDraftError("ابتدا کپشن اصلی را ثبت کنید؛ کپشن خالی قابل انتقال نیست.")
+            options["firstComment"] = original
+            draft.caption_moved_to_comment = True
+            draft.visible_caption = ""  # empty is a deliberate, safe setting
+        else:
+            if not draft.caption_moved_to_comment:
+                raise TelegramDraftError("کپشنی به کامنت منتقل نشده است.")
+            if action == "restore":
+                draft.caption_moved_to_comment = False
+                draft.visible_caption = None
+                options.pop("firstComment", None)
+            else:
+                draft.visible_caption = ""
+        draft.options = validate_instagram_options(
+            options, media_type=media_type, media_kinds=_media_kinds(draft),
+        )
+        draft.prompt_message_id = None
+        draft.prompt_kind = None
+        draft.prompt_slide = None
+        draft.updated_at = _now()
+        await session.commit()
+        return draft
+
+
 async def clear_draft_option(
     draft_id: int, owner_id: int, chat_id: int, panel_message_id: int, key: str,
 ) -> TelegramPostDraft:
@@ -540,6 +684,11 @@ async def clear_draft_option(
             raise TelegramDraftError("این صفحه قدیمی است؛ پیش‌نویس تازه را باز کنید.")
         options = dict(draft.options or {})
         options.pop(field, None)
+        if field == "firstComment" and draft.caption_moved_to_comment:
+            # A stale clear-comment button must never leave an empty caption
+            # with no first comment. Treat it as restoring the original.
+            draft.caption_moved_to_comment = False
+            draft.visible_caption = None
         draft.options = validate_instagram_options(
             options, media_type=draft_media_type(draft), media_kinds=_media_kinds(draft),
         )
@@ -565,7 +714,6 @@ async def cancel_draft(draft_id: int, owner_id: int, chat_id: int, panel_message
 
 async def enqueue_confirmed_draft(
     draft_id: int, owner_id: int, chat_id: int, panel_message_id: int,
-    *, skip_options: bool = False,
 ) -> dict:
     """Only explicit admin click; draft + queue commit atomically once."""
     async with SessionLocal() as session:
@@ -582,8 +730,16 @@ async def enqueue_confirmed_draft(
         media_type = draft_media_type(draft)
         if (not 0 < len(draft.caption.strip()) <= 2200
                 or any(not isinstance(item.get("url"), str) for item in media)):
-            raise TelegramDraftError("تا رسانه‌ها و کپشن کامل نباشند، ورود به صف ممکن نیست.")
-        options = {} if skip_options else draft.options
+            raise TelegramDraftError("تا رسانه‌ها و کپشن اصلی کامل نباشند، ورود به صف ممکن نیست.")
+        options = draft.options or {}
+        caption_for_post = draft.caption
+        if draft.caption_moved_to_comment:
+            if (media_type not in ("post", "carousel")
+                    or options.get("firstComment") != draft.caption.strip()
+                    or not isinstance(draft.visible_caption, str)
+                    or len(draft.visible_caption) > TELEGRAM_SHORT_ON_POST_CAPTION_LIMIT):
+                raise TelegramDraftError("کپشن منتقل‌شده یا متن کوتاهِ روی پست معتبر نیست؛ چیزی در صف ثبت نشد.")
+            caption_for_post = draft.visible_caption
         account = await session.get(InstagramAccount, draft.local_account_id)
         if (account is None or account.owner_id != owner_id or
                 normalize_username(account.username) != draft.expected_username):
@@ -592,8 +748,9 @@ async def enqueue_confirmed_draft(
             job = await enqueue_zernio_post(
                 session,
                 account_id=draft.local_account_id, owner_id=owner_id,
-                media_urls=[item["url"] for item in media], caption=draft.caption,
+                media_urls=[item["url"] for item in media], caption=caption_for_post,
                 media_type=media_type, idempotency_key=draft.source_key,
+                caption_moved_to_comment=draft.caption_moved_to_comment,
                 origin=("telegram_album" if draft.media_group_id is not None else
                         "telegram_video" if media_type == "reel" else "telegram_photo"),
                 telegram_chat_id=chat_id,

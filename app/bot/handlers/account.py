@@ -37,6 +37,7 @@ from app.services.limits import (
     count_accounts_for_user,
 )
 from app.services.meta.oauth import build_authorization_url
+from app.services.telegram_post_drafts import clear_pending_media_intent
 from app.webapp.auth import make_miniapp_ticket
 
 settings = get_settings()
@@ -66,9 +67,11 @@ def _welcome_text(name: str, page_count: int) -> str:
     base = (
         f"👋 سلام <b>{name}</b>!\n\n"
         "من <b>Gramma v2</b> هستم؛ پنل مدیریت فوق‌حرفه‌ای پیج‌های اینستاگرام، داخل تلگرام 🌈\n\n"
-        "📤 <b>انتشار</b> — عکس، ویدیو، ریلز، کاروسل، استوری + زمان‌بندی\n"
+        "📸 <b>پست</b> — انتخاب پایدار عکس/ویدیو، سپس تنظیمات و تأیید نهایی\n"
+        "🎬 <b>ریلز</b> — یک ویدیوی عمودی، با نمایش در فید\n"
+        "📤 <b>انتشار</b> — آلبوم کاروسل، استوری و وضعیت زمان‌بندی\n"
+        "🤝 <b>دعوت همکار</b> — پس از ارسال رسانه در تنظیمات پست، جدا از تگ کاربران\n"
         "📅 <b>تقویم محتوا</b> — نمای ماهانه پست‌های زمان‌بندی‌شده\n"
-        "🤝 <b>پست کلبریشن</b> — همکاری مشترک دو پیج متصل\n"
         "💬 <b>کامیونیتی</b> — کامنت‌ها و پاسخ خصوصی\n"
         "📥 <b>دایرکت</b> — پاسخ + دسته‌بندی هوشمند + پاسخ خودکار\n"
         "🔍 <b>جستجوی هوشمند</b> — جستجوی معنایی در کامنت‌ها و دایرکت‌ها\n"
@@ -83,6 +86,8 @@ def _welcome_text(name: str, page_count: int) -> str:
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
+    if message.from_user:
+        await clear_pending_media_intent(message.from_user.id, message.chat.id)
     async with SessionLocal() as session:
         # Hard cap: at most MAX_TOTAL_USERS registered Telegram users.
         allowed, reason = await can_register_user(session, message.from_user.id)
@@ -119,22 +124,20 @@ async def cmd_start(message: Message, state: FSMContext):
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     text = (
-        "🧭 <b>راهنمای Gramma v2</b>\n\n"
-        "/start — منوی اصلی\n"
-        "/connect — اتصال پیج اینستاگرام (حداکثر 3 پیج)\n"
-        "/publish — انتشار محتوا\n"
-        "/calendar — تقویم محتوا 📅\n"
-        "/collab — پست کلبریشن 🤝\n"
-        "/community — مدیریت کامنت‌ها\n"
-        "/direct — دایرکت‌ها\n"
-        "/search — جستجوی هوشمند 🔍\n"
-        "/insights — آمار و امنیت\n"
-        "/ai — دستیار هوش مصنوعی\n"
-        "/webapp — پنل مدیریت (Mini-App)\n"
-        "/settings — تنظیمات و قطع اتصال\n"
-        "/disconnect — قطع اتصال پیج\n"
-        "/help — همین راهنما\n\n"
-        "هر کاربر فقط به پیج(های) <b>خودش</b> دسترسی دارد."
+        "🧭 <b>راهنمای Gramma</b>\n\n"
+        "از «📋 منوی کامل» یا دکمه‌های «📸 پست» و «🎬 ریلز» استفاده کنید. "
+        "این دکمه‌ها منتظر رسانه می‌مانند؛ «ریلز» فقط یک ویدیوی عمودی می‌پذیرد.\n"
+        "می‌توانید بدون زدن دکمه نیز در چت خصوصی مدیر رسانه بفرستید: "
+        "عکس تکی ← پست فید؛ ویدیوی تکی ← ریلز با نمایش در فید؛ "
+        "آلبوم 2 تا 10 عکس/ویدیو ← کاروسل. سپس مستقیم تنظیمات باز می‌شود.\n\n"
+        "🤝 دعوت همکار (Collab) و 👤 تگ کاربران دو گزینهٔ جدا در تنظیمات رسانه‌اند. "
+        "برای پست و کاروسل می‌توانید کپشن اصلی را به اولین کامنت منتقل کنید "
+        "و روی پست کپشن کوتاه یا خالی بگذارید؛ درج کامنت به مجوز comments اتصال Zernio نیاز دارد.\n"
+        "⚠️ در مسیر فعلی Zernio برای ویدیوی تکی گزینهٔ مستندِ پستِ غیرریلز "
+        "یا تنظیم Poll/Prompt نداریم؛ این محدودیتِ این اتصال است، نه ممنوعیت کلی Meta.\n\n"
+        "رسانه هرگز با ارسال خودکار وارد صف نمی‌شود: فقط دکمهٔ «تأیید نهایی؛ افزودن به صف» "
+        "در پنل پیش‌نویس آن را صف می‌کند. انتشار بعداً انجام می‌شود.\n"
+        "فقط دستور مجاز برای نمونهٔ صف: /test_post."
     )
     await message.answer(text)
 

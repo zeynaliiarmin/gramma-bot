@@ -19,7 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models import ActivityLog, InstagramAccount, Post
-from app.services.instagram_options import InstagramOptionError, validate_instagram_options
+from app.services.instagram_options import (
+    InstagramOptionError, validate_instagram_caption, validate_instagram_options,
+)
 from app.services.limits import ZERNIO_POST_DAILY_LIMIT, ZERNIO_POST_MIN_SPACING_SECONDS
 from app.services.zernio_publishing import (
     ZernioPublishError,
@@ -89,6 +91,7 @@ async def enqueue_zernio_post(
     telegram_message_id: int | None = None,
     legacy_post_id: int | None = None,
     instagram_options: dict | None = None,
+    caption_moved_to_comment: bool = False,
 ) -> dict:
     """Insert exactly one pending post; caller commits this DB transaction.
 
@@ -104,23 +107,29 @@ async def enqueue_zernio_post(
         raise OutboundQueueError("نام کاربری پیج متصل معتبر نیست.")
     if not settings.zernio_api_key:
         raise OutboundQueueError("اتصال Zernio تنظیم نشده است؛ پستی در صف ثبت نشد.")
-    if not isinstance(caption, str) or len(caption) > 2200 or (not caption.strip() and media_type != "story"):
-        raise OutboundQueueError("برای پست، کپشن غیرخالی و حداکثر 2200 نویسه لازم است.")
     if media_type not in ("post", "carousel", "reel", "story"):
         raise OutboundQueueError("نوع محتوای قابل انتشار معتبر نیست.")
     if origin not in ("telegram_photo", "telegram_video", "telegram_album", "telegram_test", "scheduled_post"):
         raise OutboundQueueError("منبع درخواست معتبر نیست.")
+    if caption_moved_to_comment and origin not in ("telegram_photo", "telegram_album"):
+        raise OutboundQueueError("انتقال کپشن فقط برای پیش‌نویس تأییدشدهٔ عکس یا آلبوم مجاز است.")
     if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 180:
         raise OutboundQueueError("شناسه یکتای درخواست نامعتبر است.")
-    # Same media contract as the provider adapter, checked before insertion.
+    # Same media/caption contract as the provider adapter, checked before insertion.
     try:
         items = _media_items(media_urls, media_type)
         safe_options = validate_instagram_options(
             instagram_options, media_type=media_type,
             media_kinds=[item["type"] for item in items],
         )
+        validate_instagram_caption(
+            caption, media_type=media_type, options=safe_options,
+            caption_moved_to_comment=caption_moved_to_comment,
+        )
     except (ZernioPublishError, InstagramOptionError) as exc:
         raise OutboundQueueError(str(exc)) from exc
+    if media_type == "reel":
+        safe_options["shareToFeed"] = True
 
     payload = {
         "owner_id": owner_id,
@@ -131,6 +140,8 @@ async def enqueue_zernio_post(
         "media_type": media_type,
         "origin": origin,
     }
+    if caption_moved_to_comment:
+        payload["caption_moved_to_comment"] = True
     if telegram_chat_id is not None:
         payload["telegram_chat_id"] = telegram_chat_id
     if telegram_message_id is not None:
@@ -200,18 +211,26 @@ async def process_one_zernio_post() -> dict:
                     or account.owner_id != owner or account.status != "connected"
                     or normalize_username(account.username) != username):
                 raise OutboundQueueError("مالکیت یا اتصال پیج تغییر کرده است؛ انتشار متوقف شد.")
-            if not isinstance(caption, str) or (not caption.strip() and media_type != "story"):
-                raise OutboundQueueError("کپشن لازم است؛ انتشار متوقف شد.")
             items = _media_items(urls, media_type)
             platform_options = validate_instagram_options(
                 payload.get("instagram_options"), media_type=media_type,
                 media_kinds=[item["type"] for item in items],
             )
+            moved = payload.get("caption_moved_to_comment", False)
+            if moved and payload.get("origin") not in ("telegram_photo", "telegram_album"):
+                raise OutboundQueueError("منبع انتقال کپشن معتبر نیست؛ انتشار متوقف شد.")
+            validate_instagram_caption(
+                caption, media_type=media_type, options=platform_options,
+                caption_moved_to_comment=moved,
+            )
+            if media_type == "reel":
+                platform_options["shareToFeed"] = True
             publisher = get_zernio_publisher()
             if not publisher.configured:
                 raise OutboundQueueError("اتصال Zernio تنظیم نشده است؛ انتشار متوقف شد.")
         except (KeyError, ValueError, TypeError, OutboundQueueError, ZernioPublishError, InstagramOptionError) as exc:
-            reason = str(exc) if isinstance(exc, (OutboundQueueError, ZernioPublishError)) else "دادهٔ صف ناقص است؛ بررسی دستی لازم است."
+            reason = (str(exc) if isinstance(exc, (OutboundQueueError, ZernioPublishError, InstagramOptionError))
+                      else "دادهٔ صف ناقص است؛ بررسی دستی لازم است.")
             await _mark_failed(queue_id, reason)
             return {"claimed": 1, "published_requests": 0, "state": "failed"}
 
@@ -265,6 +284,7 @@ async def process_one_zernio_post() -> dict:
             media_type=media_type,
             idempotency_key=key,
             platform_specific_data=platform_options,
+            caption_moved_to_comment=moved,
         )
     except Exception as exc:  # noqa: BLE001
         if isinstance(exc, ZernioPublishError):
@@ -470,7 +490,10 @@ async def deliver_one_confirmed_notification(queue_id: int | None = None) -> boo
     if not isinstance(owner, int) or owner not in settings.admin_ids:
         logger.warning("post notification suppressed: owner not authorized queue_id=%s", queue_id)
         return False
-    delivered = await _notify(owner, "پست شما با موفقیت منتشر شد", success=True)
+    notice = "پست شما با موفقیت منتشر شد"
+    if row.get("caption_moved_to_comment") is True:
+        notice += "\n💬 کپشن اصلی باید در اولین کامنت باشد؛ وجود کامنت را بررسی کنید (مجوز comments لازم است)."
+    delivered = await _notify(owner, notice, success=True)
     if delivered:
         try:
             await _commit_queue_update("""

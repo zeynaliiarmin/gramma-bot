@@ -45,6 +45,16 @@ class TelegramPostDraft(Base):
     caption_from_reply: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false"),
     )
+    # The original Telegram caption remains here, even when the visible post
+    # caption is moved to a separate short/blank field. This is never a
+    # provider option and cannot be changed by an unconfirmed callback.
+    media_intent: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="auto", server_default=text("'auto'"),
+    )
+    caption_moved_to_comment: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false"),
+    )
+    visible_caption: Mapped[str | None] = mapped_column(Text, nullable=True)
     options: Mapped[dict[str, Any]] = mapped_column(
         JSON().with_variant(JSONB, "postgresql"), nullable=False,
         default=dict, server_default=text("'{}'"),
@@ -73,3 +83,17 @@ class TelegramPostDraft(Base):
         Index("ix_telegram_post_drafts_due", "status", "updated_at"),
         Index("ix_telegram_post_drafts_owner", "owner_id", "created_at"),
     )
+
+
+class TelegramMediaIntent(Base):
+    """One expiring, private, serverless-durable waiting choice per admin."""
+
+    __tablename__ = "telegram_media_intents"
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    mode: Mapped[str] = mapped_column(String(8), nullable=False)
+    selected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, server_default=func.now(), nullable=False,
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

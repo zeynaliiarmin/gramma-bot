@@ -1,4 +1,4 @@
-"""Admin-only Telegram photo → durable post queue (never direct publish)."""
+"""Admin-only explicit test post and queue status; media uses confirmed drafts."""
 
 from __future__ import annotations
 
@@ -7,21 +7,18 @@ import logging
 from datetime import datetime, timezone
 
 from aiogram import F, Router
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Chat, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.db.repositories import get_active_account
 from app.models import InstagramAccount
-from app.services.media_storage import save_telegram_photo_to_supabase
 from app.services.outbound_queue import (
     OutboundQueueError,
     enqueue_zernio_post,
     get_owned_post,
-    get_owned_post_by_key,
     list_owned_posts,
     reconcile_one_stalled_processing_post,
     refresh_one_accepted_post,
@@ -100,52 +97,9 @@ async def cmd_test_post(message: Message, state: FSMContext) -> None:
         await message.answer("⚠️ وضعیت ثبت درخواست نامشخص است؛ پیش از ارسال دوباره، وضعیت صف را بررسی کنید.", reply_markup=_keyboard())
 
 
-@router.message(F.photo, F.chat.type == "private", StateFilter(None))
-async def admin_photo_post(message: Message) -> None:
-    """One spontaneous private-chat photo with its own caption = one post."""
-    if not message.from_user or message.from_user.id not in settings.admin_ids:
-        return
-    if message.media_group_id:
-        if message.caption:
-            await message.answer("برای این مسیر، یک عکس تکی همراه کپشن بفرستید؛ آلبوم به‌طور خودکار منتشر نمی‌شود.")
-        return
-    caption = (message.caption or "").strip()
-    if not caption:
-        await message.answer("برای صف انتشار، عکس را همراه کپشنِ غیرخالی در یک پیام بفرستید؛ این عکس منتشر نشد.")
-        return
-    if len(caption) > 2200:
-        await message.answer("کپشن باید حداکثر 2200 نویسه باشد؛ این عکس منتشر نشد.")
-        return
-
-    key = telegram_post_key(message.chat.id, message.message_id)
-    try:
-        # Short-circuit redeliveries BEFORE downloading/uploading a second time.
-        async with SessionLocal() as session:
-            prior = await get_owned_post_by_key(session, key, message.from_user.id)
-            if prior:
-                await _ack_queue(message, {"id": prior["id"], "created": False}, username="")
-                return
-            account = await get_active_account(session, message.from_user.id)
-            if account is None or account.status != "connected":
-                raise OutboundQueueError("پیج فعال و متصلِ متعلق به مدیر پیدا نشد.")
-            target_id, target_username = account.id, account.username
-        if not settings.supabase_url or not settings.supabase_service_role_key:
-            raise OutboundQueueError("فضای ذخیره‌سازی تنظیم نشده است؛ پستی در صف ثبت نشد.")
-        public_url = await save_telegram_photo_to_supabase(message.bot, message)
-        async with SessionLocal() as session:
-            job = await enqueue_zernio_post(
-                session, account_id=target_id, owner_id=message.from_user.id,
-                media_urls=[public_url], caption=caption,
-                idempotency_key=key, origin="telegram_photo",
-                telegram_chat_id=message.chat.id, telegram_message_id=message.message_id,
-            )
-            await session.commit()
-        await _ack_queue(message, job, username=target_username)
-    except OutboundQueueError as exc:
-        await message.answer(f"⚠️ {html.escape(str(exc))}")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("photo queue insertion uncertain error=%s", type(exc).__name__)
-        await message.answer("⚠️ ذخیره یا ثبت درخواست قطعی نشد؛ پیش از ارسال دوباره وضعیت صف را بررسی کنید.", reply_markup=_keyboard())
+# Ordinary private photos are handled by telegram_drafts and cannot enqueue
+# here. /test_post above is the only command-based exception, by explicit
+# admin request; its queue path and existing safeguards remain unchanged.
 
 
 def _when(value: object) -> str:
@@ -189,6 +143,8 @@ def _detail(job: dict) -> str:
     ]
     if job["status"] == "pending" and job["scheduled_for"] > datetime.now(timezone.utc):
         lines.append(f"⏳ زودترین نوبت: {_when(job['scheduled_for'])}")
+    if payload.get("caption_moved_to_comment") is True:
+        lines.append("💬 کپشن اصلی برای اولین کامنت تنظیم شده؛ وجود کامنت را پس از انتشار بررسی کنید.")
     if payload.get("accepted_at"):
         lines.append(f"📨 پذیرش توسط Zernio: {_when(payload['accepted_at'])}")
     if payload.get("confirmed_at"):

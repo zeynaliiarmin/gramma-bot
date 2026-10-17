@@ -13,10 +13,12 @@ import re
 from aiogram import F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import StateFilter
+from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message,
 )
 
+from app.bot.states import MediaWait
 from app.core.config import get_settings
 from app.services.media_storage import (
     TelegramPostMediaError,
@@ -28,18 +30,21 @@ from app.services.telegram_post_drafts import (
     apply_draft_reply,
     attach_prompt,
     cancel_draft,
+    change_caption_move,
     claim_one_draft_notice,
     clear_draft_option,
     complete_telegram_media,
     draft_media_type,
     enqueue_confirmed_draft,
     get_owned_draft,
+    get_pending_media_intent,
     invalidate_stale_panel,
     invalidate_telegram_album,
     ordered_media,
     prepare_one_due_album,
     record_draft_notice,
     reserve_telegram_media,
+    set_pending_media_intent,
 )
 from app.services.limits import TELEGRAM_ALBUM_DRAFTS_PER_TICK
 
@@ -58,30 +63,87 @@ def _button(text_value: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text_value, callback_data=data)
 
 
+@router.callback_query(F.data.in_({
+    "publish:wait:post", "publish:wait:reel",
+    # Old inline buttons may still be visible in Telegram after deployment.
+    "publish:new:post", "publish:new:photo", "publish:new:carousel",
+    "publish:new:reel", "publish:new:video",
+}))
+async def wait_for_admin_media(callback: CallbackQuery, state: FSMContext) -> None:
+    if (not callback.from_user or not isinstance(callback.message, Message)
+            or not _admin_private(callback.from_user.id, callback.message.chat)):
+        await callback.answer("این گزینه فقط در چت خصوصی مدیر فعال است.")
+        return
+    await callback.answer()
+    mode = "post" if (callback.data or "") in {
+        "publish:wait:post", "publish:new:post", "publish:new:photo", "publish:new:carousel",
+    } else "reel"
+    try:
+        page = await set_pending_media_intent(
+            callback.from_user.id, callback.message.chat.id, mode,
+        )
+        # An explicit NEW publication selection cancels any earlier, legacy
+        # in-memory dialog. Draft settings and notifications never touch FSM.
+        await state.clear()
+        prompt = ("لطفاً عکس یا ویدیوی خود را ارسال کنید" if mode == "post"
+                  else "لطفاً ویدیوی عمودی خود را ارسال کنید")
+        text_value = f"{prompt}\n🎯 پیج: @{html.escape(page)}\nرسانه ابتدا به تنظیمات می‌رود؛ فقط تأیید نهایی آن را به صف می‌افزاید."
+        if mode == "post":
+            text_value += ("\nویدیوی تکی در مسیر فعلی Zernio به شکل ریلز با نمایش در فید "
+                           "ارسال می‌شود؛ نوع دقیق در تنظیمات نشان داده می‌شود.")
+        try:
+            await callback.message.edit_text(text_value)
+        except Exception:  # noqa: BLE001
+            await callback.message.answer(text_value)
+    except TelegramDraftError as exc:
+        await callback.message.answer("⚠️ " + html.escape(str(exc)))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("media intent selection uncertain error=%s", type(exc).__name__)
+        await callback.message.answer("⚠️ ثبت حالت انتظار قطعی نشد؛ دوباره روی دکمهٔ پست یا ریلز بزنید.")
+
+
 def _panel_text(draft) -> str:
     parts = ordered_media(draft)
+    media_type = draft_media_type(draft)
     kind = {"post": "عکس تکی / پست فید", "reel": "ویدیوی تکی / ریلز",
-            "carousel": "آلبوم / کاروسل"}[draft_media_type(draft)]
+            "carousel": "آلبوم / کاروسل"}[media_type]
     choices = draft.options or {}
+    original = draft.caption or ""
     rows = [
         f"🖼 پیش‌نویس {draft.id} — {kind} ({len(parts)} رسانه)",
         f"🎯 پیج: @{html.escape(draft.expected_username)}",
-        f"📝 کپشن: {html.escape(draft.caption[:280])}{'…' if len(draft.caption) > 280 else ''}",
-        "",
-        "تنظیمات اختیاری (بدون تنظیم نیز می‌توانید به صف اضافه کنید):",
-        f"📍 لوکیشن: {html.escape(choices.get('locationId', '—'))}",
-        "🤝 همکارها: " + ", ".join("@" + html.escape(name) for name in choices.get("collaborators", []))
-        if choices.get("collaborators") else "🤝 همکارها: —",
+        f"📝 کپشن اصلی: {html.escape(original[:280])}{'…' if len(original) > 280 else ''}",
     ]
+    if media_type == "reel":
+        rows.append("✅ نمایش ریلز در فید: روشن (shareToFeed)")
+        if draft.media_intent == "post":
+            rows.append("⚠️ با وجود انتخاب «پست»، ویدیوی تکی در مسیر فعلی Zernio ریلزِ قابل‌نمایش در فید است؛ گزینهٔ مستندی برای ویدیوی فیدِ غیرریلز نداریم.")
+    if draft.caption_moved_to_comment:
+        visible = draft.visible_caption or ""
+        rows.extend((
+            "📩 کپشن اصلی به اولین کامنت منتقل شد.",
+            "✏️ کپشن روی خود پست: "
+            + (html.escape(visible) if visible else "خالی (بدون کپشن)"),
+            "⚠️ برای درج اولین کامنت، اتصال Zernio باید مجوز comments داشته باشد؛ "
+            "بدون این مجوز ممکن است پست منتشر شود ولی متنِ منتقل‌شده در کامنت نیاید.",
+        ))
+    rows.extend((
+        "",
+        "تنظیمات اختیاری:",
+        f"📍 لوکیشن: {html.escape(choices.get('locationId', '—'))}",
+        "🤝 دعوت همکار (Collab): " + (
+            ", ".join("@" + html.escape(name) for name in choices.get("collaborators", []))
+            if choices.get("collaborators") else "—"),
+    ))
     tags = choices.get("userTags") or []
-    rows.append("👤 تگ‌ها: " + (
+    rows.append("👤 تگ کاربران روی رسانه: " + (
         ", ".join((f"اسلاید {tag['mediaIndex'] + 1}: " if "mediaIndex" in tag else "")
                   + "@" + html.escape(tag["username"]) for tag in tags)
         if tags else "—"))
-    if draft_media_type(draft) != "reel":
+    if media_type in ("post", "carousel"):
         comment = choices.get("firstComment") or "—"
         rows.append(f"💬 اولین کامنت: {html.escape(comment[:150])}{'…' if len(comment) > 150 else ''}")
-    rows.extend(("", "دکمهٔ «انتشار» فقط یک درخواست در صف ثبت می‌کند؛ انتشار واقعی بعداً و طبق محدودیت‌ها انجام می‌شود."))
+    rows.extend(("", "فقط دکمهٔ «تأیید نهایی؛ افزودن به صف» درخواست را ثبت می‌کند؛ انتشار واقعی بعداً و طبق محدودیت‌ها انجام می‌شود."))
     return "\n".join(rows)
 
 
@@ -94,20 +156,29 @@ def _panel_keyboard(draft, *, slides: bool = False) -> InlineKeyboardMarkup:
         rows.append([_button("◀️ تنظیمات", root + "back")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
     rows = [
-        [_button("📍 لوکیشن", root + "set:location"), _button("🤝 همکارها", root + "set:collaborators")],
-        [_button("👤 تگ کاربر", root + ("slides" if draft.media_group_id is not None else "tag:0")),
-         _button("✏️ ویرایش کپشن", root + "set:caption")],
+        [_button("📍 لوکیشن", root + "set:location"),
+         _button("🤝 دعوت همکار", root + "set:collaborators")],
+        [_button("👤 تگ کاربر روی رسانه", root + ("slides" if draft.media_group_id is not None else "tag:0")),
+         _button("✏️ ویرایش کپشن اصلی", root + "set:caption")],
     ]
     if draft_media_type(draft) in ("post", "carousel"):
-        rows.append([_button("💬 اولین کامنت", root + "set:first_comment")])
+        if draft.caption_moved_to_comment:
+            rows.append([_button("✏️ کپشن کوتاه روی پست", root + "set:short_caption")])
+            if draft.visible_caption:
+                rows.append([_button("🚫 بدون کپشن روی پست", root + "clear:short")])
+            rows.append([_button("↩️ بازگرداندن کپشن به پست", root + "clear:move")])
+        else:
+            rows.append([_button("📩 انتقال کپشن به اولین کامنت", root + "move")])
+            rows.append([_button("💬 اولین کامنت جداگانه", root + "set:first_comment")])
     choices = draft.options or {}
     deletions = [("loc", "locationId", "لوکیشن"), ("tag", "userTags", "تگ‌ها"),
-                 ("collab", "collaborators", "همکارها"), ("comment", "firstComment", "کامنت")]
+                 ("collab", "collaborators", "همکارها")]
+    if not draft.caption_moved_to_comment:
+        deletions.append(("comment", "firstComment", "کامنت جداگانه"))
     for code, field, label in deletions:
         if choices.get(field):
             rows.append([_button(f"❌ حذف {label}", root + "clear:" + code)])
-    rows.append([_button("🚀 انتشار (افزودن به صف)", root + "send")])
-    rows.append([_button("⏭ بدون تنظیمات؛ افزودن به صف", root + "skip")])
+    rows.append([_button("🚀 تأیید نهایی؛ افزودن به صف", root + "send")])
     rows.append([_button("🗑 لغو پیش‌نویس", root + "cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -116,9 +187,17 @@ def _prompt_text(draft, kind: str, slide: int | None = None) -> str:
     header = f"📝 پیش‌نویس {draft.id} — "
     if kind == "caption":
         hint = (f"\n⚠️ {html.escape(draft.error_text)}" if draft.error_text else "")
-        return (header + "کپشن لازم است.\n"
-                "به همین پیام ریپلای کنید و کپشن نهایی را بنویسید (حداکثر 2200 نویسه)."
-                " تا کپشن ثبت نشود، امکان افزودن به صف وجود ندارد." + hint)
+        moved_hint = (" اگر انتقال فعال است، همین متن به اولین کامنت می‌رود."
+                      if draft.caption_moved_to_comment else "")
+        return (header + "کپشن اصلی\n"
+                "به همین پیام ریپلای کنید و کپشن اصلی را بنویسید (حداکثر 2200 نویسه)."
+                " تا کپشن اصلی ثبت نشود، امکان افزودن به صف وجود ندارد."
+                + moved_hint + hint)
+    if kind == "short_caption":
+        return (header + "کپشن کوتاه روی خود پست\n"
+                "متن کوتاه را به همین پیام ریپلای کنید (حداکثر 150 نویسه). "
+                "پست در ابتدا بدون کپشن است؛ برای حذف متن کوتاهِ ثبت‌شده، "
+                "دکمهٔ «بدون کپشن روی پست» در تنظیمات را بزنید.")
     if kind == "location":
         return (header + "لوکیشن\nشناسهٔ عددی Facebook Page دارای موقعیت را به همین پیام ریپلای کنید؛ "
                 "نام مکان یا آدرس کار نمی‌کند. Zernio جستجوی مکان ارائه نکرده است.")
@@ -236,17 +315,41 @@ async def _reject_album_fragment(message: Message, reason: str) -> None:
         await message.answer("⚠️ آلبوم نامعتبر است؛ وضعیت رد آن نامشخص شد. از تأیید هیچ پنل مربوط به آن استفاده نکنید.")
 
 
-@router.message(F.chat.type == "private", F.media_group_id, F.document | F.audio, StateFilter(None))
-async def reject_non_photo_album(message: Message) -> None:
+async def _legacy_story_dialog(state: FSMContext) -> bool:
+    return (await state.get_state() == MediaWait.waiting.state
+            and (await state.get_data()).get("publish_kind") == "story")
+
+
+@router.message(F.chat.type == "private", F.media_group_id, F.document | F.audio,
+                StateFilter(None, MediaWait.waiting))
+async def reject_non_photo_album(message: Message, state: FSMContext) -> None:
     if not message.from_user or not _admin_private(message.from_user.id, message.chat):
+        raise SkipHandler()
+    if await _legacy_story_dialog(state):
         raise SkipHandler()
     await _reject_album_fragment(message, "آلبوم برای انتشار فقط می‌تواند شامل عکس و ویدیوی قابل‌دریافت باشد.")
 
 
-@router.message(F.chat.type == "private", F.photo | F.video, StateFilter(None))
-async def collect_telegram_post_media(message: Message) -> None:
+@router.message(F.chat.type == "private", F.document | F.video_note | F.animation | F.audio,
+                StateFilter(None))
+async def reject_unsupported_waiting_media(message: Message) -> None:
     if not message.from_user or not _admin_private(message.from_user.id, message.chat):
         raise SkipHandler()
+    mode = await get_pending_media_intent(message.from_user.id, message.chat.id)
+    if mode is None:
+        raise SkipHandler()  # not a post dialog; leave other bot features alone
+    prompt = ("ریلز فقط یک ویدیوی عمودی MP4/MOV به‌صورت ویدیوی تلگرام می‌پذیرد."
+              if mode == "reel" else "برای پست، عکس یا ویدیوی تلگرام بفرستید؛ فایلِ سند/صوت پذیرفته نیست.")
+    await message.answer("⚠️ " + prompt + "\nحالت انتظار شما حفظ شد؛ رسانهٔ درست را بفرستید.")
+
+
+@router.message(F.chat.type == "private", F.photo | F.video,
+                StateFilter(None, MediaWait.waiting))
+async def collect_telegram_post_media(message: Message, state: FSMContext) -> None:
+    if not message.from_user or not _admin_private(message.from_user.id, message.chat):
+        raise SkipHandler()
+    if await _legacy_story_dialog(state):
+        raise SkipHandler()  # unchanged Story dialog still belongs to publish.py
     try:
         info = describe_telegram_post_media(message)
         reserved = await reserve_telegram_media(
@@ -317,20 +420,21 @@ async def draft_button(callback: CallbackQuery) -> None:
     if len(bits) < 3 or not bits[1].isdigit():
         await callback.answer("دکمه معتبر نیست.")
         return
+    await callback.answer()
     draft_id = int(bits[1])
     action = bits[2]
     try:
         draft = await get_owned_draft(draft_id, callback.from_user.id, callback.message.chat.id)
         if draft.status != "ready" or draft.panel_message_id != callback.message.message_id:
             raise TelegramDraftError("این پنل قدیمی است؛ آلبوم هنوز در حال تکمیل یا قبلاً به صف افزوده شده است.")
-        if action in ("send", "skip") and len(bits) == 3:
+        if action == "send" and len(bits) == 3:
             job = await enqueue_confirmed_draft(
                 draft_id, callback.from_user.id, callback.message.chat.id,
-                callback.message.message_id, skip_options=(action == "skip"),
+                callback.message.message_id,
             )
             await callback.message.edit_text(
-                "✅ " + ("درخواست با تنظیمات انتخاب‌شده" if action == "send" else "درخواست بدون تنظیمات اختیاری")
-                + f" در صف ثبت شد.\n🆔 شناسه صف: {job['id']}\n"
+                "✅ درخواست با تنظیماتِ تأییدشده در صف ثبت شد."
+                + f"\n🆔 شناسه صف: {job['id']}\n"
                 "انتشار واقعی تنها بعداً توسط پردازشگر زمان‌بندی‌شده انجام می‌شود.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [_button("🔄 وضعیت این پست", f"oq:refresh:{job['id']}")],
@@ -345,17 +449,31 @@ async def draft_button(callback: CallbackQuery) -> None:
                                              reply_markup=_panel_keyboard(draft, slides=True))
         elif action == "back" and len(bits) == 3:
             await callback.message.edit_text(_panel_text(draft), reply_markup=_panel_keyboard(draft))
+        elif (action == "move" and len(bits) == 3) or (
+            action == "clear" and len(bits) == 4 and bits[3] in ("move", "short")
+        ):
+            move_action = ("move" if action == "move" else
+                           "restore" if bits[3] == "move" else "empty")
+            draft = await change_caption_move(
+                draft_id, callback.from_user.id, callback.message.chat.id,
+                callback.message.message_id, action=move_action,
+            )
+            await callback.message.edit_text(_panel_text(draft), reply_markup=_panel_keyboard(draft))
         elif action == "clear" and len(bits) == 4:
             draft = await clear_draft_option(draft_id, callback.from_user.id, callback.message.chat.id,
                                              callback.message.message_id, bits[3])
             await callback.message.edit_text(_panel_text(draft), reply_markup=_panel_keyboard(draft))
         elif ((action == "set" and len(bits) == 4 and bits[3] in
-               ("caption", "location", "collaborators", "first_comment"))
+               ("caption", "short_caption", "location", "collaborators", "first_comment"))
               or (action == "tag" and len(bits) == 4 and bits[3].isdigit())):
             if action == "set":
                 kind, slide = bits[3], None
-                if kind == "first_comment" and draft_media_type(draft) == "reel":
-                    raise TelegramDraftError("اولین کامنت برای ریلز در این مسیر پشتیبانی نمی‌شود.")
+                if kind == "first_comment" and (
+                    draft_media_type(draft) == "reel" or draft.caption_moved_to_comment
+                ):
+                    raise TelegramDraftError("اولین کامنت جداگانه در این حالت مجاز نیست؛ در حالت انتقال، کپشن اصلی همان کامنت است.")
+                if kind == "short_caption" and not draft.caption_moved_to_comment:
+                    raise TelegramDraftError("ابتدا کپشن اصلی را به اولین کامنت منتقل کنید.")
             else:
                 kind, slide = "tag", int(bits[3])
                 if not 0 <= slide < len(ordered_media(draft)):
@@ -375,7 +493,7 @@ async def draft_button(callback: CallbackQuery) -> None:
         await callback.message.answer("⚠️ " + html.escape(str(exc)))
     except Exception as exc:  # noqa: BLE001
         logger.warning("draft callback uncertain id=%s error=%s", draft_id, type(exc).__name__)
-        if action == "clear":
+        if action in ("clear", "move"):
             try:
                 if await invalidate_stale_panel(
                     draft_id, callback.from_user.id, callback.message.chat.id,
