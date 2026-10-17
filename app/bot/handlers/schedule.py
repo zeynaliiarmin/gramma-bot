@@ -42,6 +42,8 @@ async def _zernio_queue_error(session, post: Post, user_id: int) -> str | None:
         return "انتشار فقط برای پیج متصلِ مدیر از مسیر Zernio مجاز است."
     if post.status != "draft":
         return "این پست قبلاً ثبت شده است؛ برای انتشار دوباره پست جدید بسازید."
+    if post.kind != "story" and not (post.caption or "").strip():
+        return "برای انتشار پست، عکس/رسانه را همراه کپشنِ غیرخالی ارسال کنید."
     urls = (await session.execute(select(Media.url).where(Media.post_id == post.id))).scalars().all()
     if not urls or any(not url.startswith("https://") for url in urls):
         return "رسانه باید URL عمومی HTTPS داشته باشد؛ فایل محلی قابل انتشار نیست."

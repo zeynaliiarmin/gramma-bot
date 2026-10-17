@@ -137,7 +137,7 @@ from aiogram.types import CallbackQuery  # noqa: E402
 
 from app.bot.handlers import (  # noqa: E402
     account, ai, calendar, collab, community, direct,
-    insights, navigation, publish, schedule, search, studio,
+    insights, navigation, outbound, publish, schedule, search, studio,
 )
 from app.bot.main import (  # noqa: E402
     DatabaseMiddleware,
@@ -165,7 +165,7 @@ def _build_webhook_dispatcher() -> Dispatcher:
     dp.message.middleware(DatabaseMiddleware())
     dp.errors.middleware(ErrorHandlerMiddleware())
     for module in (
-        account, ai, calendar, collab, community, direct,
+        outbound, account, ai, calendar, collab, community, direct,
         insights, navigation, publish, schedule, search, studio,
     ):
         dp.include_router(_detached_copy(module.router))
@@ -300,7 +300,8 @@ async def _dispatch(update) -> None:
 async def cron_trigger(job: str, request: Request):
     """Endpoint pg_cron (or Vercel Cron) calls for scheduled jobs:
 
-      * publish                   — publish due posts (every 1 min)
+      * publish                   — enqueue due posts (every 1 min)
+      * outbound-post             — submit at most one queued Zernio post (every 5 min)
       * process-comment-queue     — drain the comment-reply queue (every 5 min)
       * check-instagram-health    — probe connected pages (every 10 min)
       * reset-daily-counters      — reports today's counters (00:00)
@@ -309,10 +310,26 @@ async def cron_trigger(job: str, request: Request):
     Guarded by the shared CRON_SECRET (sent as ``X-Cron-Secret``).
     """
     cron_secret = get_settings().cron_secret
+    # Unlike legacy cron routes, outbound publication must NEVER run when
+    # CRON_SECRET is missing. No GET invocation can publish, either.
+    if job == "outbound-post" and not cron_secret:
+        return Response(status_code=503, content="cron secret not configured")
     if cron_secret:
         provided = request.headers.get("X-Cron-Secret", "")
         if not hmac.compare_digest(provided.encode(), cron_secret.encode()):
             return Response(status_code=403, content="forbidden")
+
+    if job == "outbound-post":
+        if request.method != "POST":
+            return Response(status_code=405, content="POST required")
+        from app.services.outbound_queue import process_one_zernio_post
+
+        try:
+            result = await process_one_zernio_post()
+            return {"ok": True, **result}
+        except Exception:  # noqa: BLE001
+            logger.exception("outbound post worker failed; claimed jobs are never retried")
+            return Response(status_code=500, content='{"ok":false,"retry_safe":false}')
 
     if job == "publish":
         from app.services.publisher import publish_due_posts

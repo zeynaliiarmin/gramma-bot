@@ -228,6 +228,58 @@ class ZernioPublisher:
             "scheduled_jalali": jalali.to_jalali_str(scheduled) if scheduled else None,
         }
 
+    async def get_post_status(
+        self, post_id: str, *, expected_account_id: str
+    ) -> dict[str, Any]:
+        """GET only: reconcile one accepted post, never submit or retry it."""
+        if not self.configured:
+            raise ZernioPublishError("کلید Zernio تنظیم نشده است.", 503)
+        if not isinstance(post_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", post_id):
+            raise ZernioPublishError("شناسه پست Zernio نامعتبر است.")
+        if not expected_account_id:
+            raise ZernioPublishError("شناسه پیج Zernio نامعتبر است.")
+        try:
+            async with self._client_factory() as client:
+                response = await client.posts.aget_post(post_id)
+        except ZernioError as exc:
+            raise _provider_error(exc, "get_post") from exc
+        except Exception as exc:
+            logger.warning("Zernio get_post_status failed: %s", type(exc).__name__)
+            raise ZernioPublishError("بروزرسانی وضعیت از Zernio ممکن نشد.", 502) from exc
+
+        post = response.get("post") if isinstance(response, dict) else None
+        if not isinstance(post, dict) or str(post.get("_id", "")) != post_id:
+            raise ZernioPublishError("پاسخ وضعیت Zernio معتبر نیست.", 502)
+        targets = post.get("platforms") or []
+        instagram = [p for p in targets if isinstance(p, dict) and p.get("platform") == "instagram"]
+        if len(instagram) != 1:
+            raise ZernioPublishError("پیج مقصد پست در Zernio مشخص نیست.", 502)
+        target = instagram[0]
+        account = target.get("accountId")
+        target_id = account.get("_id") if isinstance(account, dict) else account
+        if str(target_id) != expected_account_id:
+            raise ZernioPublishError("پیج مقصد پست در Zernio تغییر کرده است.", 403)
+        status = str(post.get("status") or "unknown").lower()
+        target_status = str(target.get("status") or "unknown").lower()
+        # Both the post AND Instagram's target must confirm success. For one
+        # target, a terminal platform failure takes precedence over a rollup.
+        if target_status in ("failed", "partial") or status in ("failed", "partial"):
+            safe_status = "failed" if status != "partial" else "partial"
+        elif status == "published" and target_status == "published":
+            safe_status = "published"
+        else:
+            safe_status = "publishing"
+        timestamp = target.get("publishedAt") or post.get("publishedAt")
+        published_at = None
+        if timestamp and safe_status == "published":
+            try:
+                stamp = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+                if stamp.tzinfo is not None:
+                    published_at = stamp.astimezone(timezone.utc).isoformat()
+            except (ValueError, TypeError, OverflowError):
+                pass
+        return {"status": safe_status, "published_at": published_at}
+
     async def publish_post(
         self,
         *,

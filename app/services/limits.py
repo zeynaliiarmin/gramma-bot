@@ -30,6 +30,12 @@ MAX_TOTAL_USERS = settings.max_total_users                      # 24 کاربر 
 MAX_TOTAL_INSTAGRAM_ACCOUNTS = settings.max_total_instagram_accounts  # 24 پیج کل
 MAX_ACCOUNTS_PER_USER = settings.max_accounts_per_user          # 3 پیج به ازای هر کاربر
 
+# Real Zernio posts: per Instagram page, per Tehran calendar day. A slot is
+# spent BEFORE provider submission, including ambiguous timeouts/crashes.
+# This does not change the separate ChatbotX comment/DM caps below.
+ZERNIO_POST_DAILY_LIMIT = 3
+ZERNIO_POST_MIN_SPACING_SECONDS = 30 * 60
+
 REASON_USER_LIMIT = "user_limit"
 REASON_USER_TOTAL_LIMIT = "user_total_limit"
 REASON_TOTAL_LIMIT = "total_limit"

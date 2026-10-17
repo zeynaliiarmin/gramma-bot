@@ -9,6 +9,7 @@ from app.bot.handlers import (  # noqa: F401
     direct,
     insights,
     navigation,
+    outbound,
     publish,
     schedule,
     search,

@@ -84,16 +84,39 @@ async def upload_to_supabase_storage(local_path: Path, ext: str) -> str:
     key = f"gramma/{uuid.uuid4().hex}.{ext}"
     bucket = settings.supabase_storage_bucket
     url = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/{bucket}/{key}"
+    content_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                    "mp4": "video/mp4", "mov": "video/quicktime"}.get(ext.lower(), "application/octet-stream")
     headers = {
         "Authorization": f"Bearer {settings.supabase_service_role_key}",
         "apikey": settings.supabase_service_role_key,
+        "Content-Type": content_type,
+        "x-upsert": "false",
     }
     async with httpx.AsyncClient(timeout=60.0) as client:
         with open(local_path, "rb") as fh:
             resp = await client.post(url, headers=headers, content=fh.read())
         if resp.status_code not in (200, 201):
-            raise RuntimeError(f"storage upload failed ({resp.status_code}): {resp.text[:300]}")
+            # Never log a remote response body (could contain credentials).
+            raise RuntimeError(f"storage upload failed ({resp.status_code})")
     return f"{settings.supabase_url.rstrip('/')}/storage/v1/object/public/{bucket}/{key}"
+
+
+async def save_telegram_photo_to_supabase(bot: Bot, message: Message) -> str:
+    """Upload one Telegram photo directly to our existing public bucket.
+
+    This intentionally ignores optional S3 settings: the admin's spontaneous
+    photo always becomes a durable Supabase HTTPS URL, even in polling mode.
+    No local file path is ever queued. The /tmp download is always removed.
+    """
+    if not message.photo or not settings.supabase_url or not settings.supabase_service_role_key:
+        raise ValueError("photo or Supabase Storage is not configured")
+    local_path = UPLOAD_DIR / f"{uuid.uuid4().hex}.jpg"
+    try:
+        telegram_file = await bot.get_file(message.photo[-1].file_id)
+        await bot.download_file(telegram_file.file_path, destination=local_path)
+        return await upload_to_supabase_storage(local_path, "jpg")
+    finally:
+        local_path.unlink(missing_ok=True)
 
 
 async def save_downloaded_media_serverless(bot: Bot, message: Message, is_video: bool = False) -> str:
